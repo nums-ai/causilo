@@ -12,7 +12,7 @@ Python 3.10–3.12 and PyTorch 2.13+ are required.
 pip install causilo
 ```
 
-The first fit downloads and caches the task's [checkpoint](https://huggingface.co/nums-ai/causilo) without authentication. Model use remains subject to [Causilo License v1.0](https://huggingface.co/nums-ai/causilo/blob/main/LICENSE). `device="auto"` uses CUDA when available, otherwise CPU. Use `CUDA_VISIBLE_DEVICES=0` to select a GPU.
+The first fit automatically downloads and caches the task's [checkpoint](https://huggingface.co/nums-ai/causilo). `device="auto"` uses CUDA when available, otherwise CPU.
 
 ## Quick start
 
@@ -29,14 +29,13 @@ regressor.fit(X_train, y_train)
 predictions = regressor.predict(X_test)
 ```
 
-
 Inputs can be NumPy arrays or pandas DataFrames, including categorical features and missing feature values. Use pandas categorical dtype for numeric category codes. NumPy object arrays infer numeric columns; strings and Booleans remain categorical. Prediction reuses the fitted schema, including handling unseen categories.
 
 Classification supports up to 10 classes; regression returns point predictions. Targets must not be missing. See runnable [classification](examples/classification.py) and [regression](examples/regression.py) examples.
 
 ## Benchmarks
 
-Official TabArena default-only evaluation: 51 datasets, 51 Lite splits and 816 Full splits, using eight estimators and seed 42. System methods are excluded. Full plots show the top 16 model families by their best Elo, with default, tuned and ensembled variants.
+Evaluated using the official TabArena pipeline: 51 datasets, 51 Lite splits and 816 Full splits, using the default configuration with eight estimators and seed 42. System methods are excluded. Full plots show the top 16 model families by their best Elo, with default, tuned and ensembled variants.
 
 | Suite   | Task           |   Elo position |   Elo ↑ |   Improvability ↓ |
 |:--------|:---------------|---------------:|--------:|------------------:|
@@ -84,14 +83,13 @@ Times are median seconds per 1,000 rows; memory is mean peak usage during fit on
 | `use_kv_cache` | `False` | Prepare and retain attention keys and values during fit |
 | `retain_preprocessing` | `True` | Retain transformed training tables for later prediction |
 
+Refit after changing options. Use `device="cuda:0"` to select a specific GPU, or `CUDA_VISIBLE_DEVICES` to control which GPUs are available.
 
-Refit after changing options. Seeds must be nonnegative integers; the same inputs and seed reproduce the fitted permutations without changing global RNG state. Bitwise floating-point determinism is not forced.
-
-Preprocessing and execution policies are fixed. Ensembles cycle through none, rank2gaussian, robust and power normalization. CUDA uses FP16 mixed precision, with regression column stages and both output heads in FP32; CPU uses FP32. Regression target scaling and output restoration use float64.
+Ensembles cycle through none, rank2gaussian, robust and power normalization. See [execution details](docs/inference.md) for precision and reproducibility.
 
 ## Repeated prediction
 
-Set `use_kv_cache=True` to move reusable context computation into fit, trading additional device memory for repeated prediction speed. With `retain_preprocessing=False`, fitted transforms are retained but transformed training tables are recomputed. Refitting replaces the context; a failed fit leaves the estimator unfitted. See [cached prediction](examples/cached_prediction.py).
+Set `use_kv_cache=True` to move reusable context computation into fit, trading additional device memory for repeated prediction speed. With `retain_preprocessing=False`, fitted transforms are retained but transformed training tables are recomputed. See [cached prediction](examples/cached_prediction.py).
 
 ## Fitted-state storage
 
@@ -102,8 +100,7 @@ joblib.dump(classifier, "classifier.joblib")
 restored = joblib.load("classifier.joblib")
 ```
 
-
-Saved state includes fitted preprocessing and optional K/V caches, but excludes pretrained weights. Restoration loads the pinned checkpoint and reuses saved caches. It requires matching Causilo and dependency versions, including Python major/minor. Automatic device selection runs again; an unavailable explicit device fails. See [save/restore](examples/save_restore.py).
+Saved state includes fitted preprocessing and optional K/V caches, but excludes pretrained weights. Restoration loads the pinned checkpoint and reuses saved caches. It requires matching Causilo and dependency versions, including Python major/minor. See [save/restore](examples/save_restore.py).
 
 ## License & contact
 
