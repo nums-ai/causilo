@@ -10,10 +10,9 @@ Python 3.10–3.12 and PyTorch 2.13+ are required.
 
 ```bash
 pip install causilo
-hf auth login
 ```
 
-Authenticate with an account that has access to the [model weights](https://huggingface.co/nums-ai/causilo). Package installation does not grant weight access; the first fit downloads and caches the task's checkpoint. `device="auto"` uses CUDA when available, otherwise CPU. Use `CUDA_VISIBLE_DEVICES=0` to select a GPU.
+The first fit downloads and caches the task's [checkpoint](https://huggingface.co/nums-ai/causilo) without authentication. Model use remains subject to [Causilo License v1.0](https://huggingface.co/nums-ai/causilo/blob/main/LICENSE). `device="auto"` uses CUDA when available, otherwise CPU. Use `CUDA_VISIBLE_DEVICES=0` to select a GPU.
 
 ## Quick start
 
