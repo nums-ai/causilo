@@ -37,14 +37,24 @@ Classification supports up to 10 classes; regression returns point predictions. 
 
 Evaluated using the official TabArena pipeline: 51 datasets, 51 Lite splits and 816 Full splits, using the default configuration with eight estimators and seed 42. System methods are excluded. Full plots show the top 16 model families by their best Elo, with default, tuned and ensembled variants.
 
-| Suite   | Task           |   Elo position |   Elo ↑ |   Improvability ↓ |
-|:--------|:---------------|---------------:|--------:|------------------:|
-| Lite    | Overall        |              1 |  1817.4 |            0.0596 |
-| Lite    | Classification |              1 |  1780.1 |            0.0747 |
-| Lite    | Regression     |              1 |  2168.2 |            0.0155 |
-| Full    | Overall        |              1 |  1792.9 |            0.0684 |
-| Full    | Classification |              1 |  1771.8 |            0.0875 |
-| Full    | Regression     |              1 |  2032.6 |            0.0125 |
+**TabArena Full**
+
+| Task           | Elo position | Elo ↑  | Improvability ↓ |
+|:---------------|-------------:|-------:|----------------:|
+| Overall        | 1 | 1792.9 | 0.0684 |
+| Classification | 1 | 1771.8 | 0.0875 |
+| Regression     | 1 | 2032.6 | 0.0125 |
+
+<details>
+<summary>TabArena Lite results</summary>
+
+| Task           | Elo position | Elo ↑  | Improvability ↓ |
+|:---------------|-------------:|-------:|----------------:|
+| Overall        | 1 | 1817.4 | 0.0596 |
+| Classification | 1 | 1780.1 | 0.0747 |
+| Regression     | 1 | 2168.2 | 0.0155 |
+
+</details>
 
 ![Overall performance](docs/benchmarks/overall.png)
 
