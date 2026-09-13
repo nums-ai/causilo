@@ -1,0 +1,9 @@
+include LICENSE README.md pyproject.toml
+recursive-include src *.py
+recursive-include tests *.py
+recursive-include examples *.py
+prune reports
+prune artifacts
+prune tools
+prune .github
+global-exclude __pycache__ *.py[cod]

@@ -1,0 +1,50 @@
+{
+  "causilo_source_files_sha256": {
+    "causilo/__init__.py": "977f8e007278a4d78ce1e6533f1dff339759663c9844ca07c7e5575e515fb296",
+    "causilo/checkpoints.py": "229cb6531713798b19aae67ba30aecfbed7d2e28d25895e9525f1de1f64f1a4d",
+    "causilo/data/__init__.py": "113dc228beffc5af940aeaac8832ebc7e660b1a810d9f45252249340fe71a4f1",
+    "causilo/data/dataset.py": "a2030f3686093208478c3a75f7cdf9fe5e4e691e7bf6dd2796d5002c98c6f943",
+    "causilo/data/encoding.py": "43d9abc2adfa6c5e52ef3f224c966009a60cd8a500c4f23ae3b4f02e55d90e6a",
+    "causilo/data/ensemble.py": "4f37e6fbb5402800277fcab1896f93f04c28f6d3d989f938e4ad2a46c0bb8cb5",
+    "causilo/data/normalization.py": "5d5c4bacf1637e95cdcb34210d20d6157a4eaf4e3550ebe0cc45fdd8a78b974e",
+    "causilo/engine.py": "096a90d2ea764edbed6a355ffb72f16c6e2714d2a97d98db0e286bfa56f37a1f",
+    "causilo/estimators.py": "7d06cb06cd9a26836f5d112845e30c50191a389be94c436a33f62f21e1ac84ce",
+    "causilo/execution/__init__.py": "70573c3700e2f98aade59d9b85b33a0522431a3b2fd7d812c98d128a1cb47fe7",
+    "causilo/execution/cached.py": "e4b59d77c78b4c35c836deff9b435544b453284ff5eb90c8447101f44a2c2c8e",
+    "causilo/execution/chunks.py": "3b15dedadd56f2423ef189aaf7aa580e49bdd31a1e302e4a29d733c6219ef9a1",
+    "causilo/execution/direct.py": "7c58bb8d5d9f5d02a9cb157a07ba1b9aa814f3be2d722d90a65ca1d3d12ba7e1",
+    "causilo/execution/memory.py": "b6fa4feb647d28fcdc37dad5f28c6e3ae8c90cd2afa46958e725c0c1c2468289",
+    "causilo/execution/precision.py": "a431f6c6b0ecc0f67eea251e8e6e13b0ad8b0e8dd51f8b463aabe33ac7b4a9bb",
+    "causilo/execution/runner.py": "17018c707423487a6523aca78c8354fd18fa3e022b443a2b3fcf12a398c7c395",
+    "causilo/model.py": "dc4754743a30c6fdfc6154f40515a42d95bcc78bc54979e9b0390e0ece2cd117",
+    "causilo/nn/__init__.py": "a80e2654302dfef41c79d05bfb286b1de04eda4a50cffc37fb3b6bee7176fe30",
+    "causilo/nn/cache.py": "1cfeb5642b9e50ec3047b3c52415257e9f77a27b48f7e1c47f3acc0325974c70",
+    "causilo/nn/column.py": "6a75e595567a9b25041bf3a9ab792864e2f3ddcf6f3ee6a7b90ce82a747c3e7e",
+    "causilo/nn/embeddings.py": "f7ca2cfc25080e43638897a351cd312a131a4f0fdb1c4b11ef09eac6d1bde94d",
+    "causilo/nn/layers/__init__.py": "f233d6a45f5d666efdca0dec7a552b318d59b1860106a0b9d8acd350db0d95de",
+    "causilo/nn/layers/attention.py": "3aa33b9ea4f6d5caa2fb9e38233ed67d3d6fefdd7a44857c50d9017b91c853ea",
+    "causilo/nn/layers/feedforward.py": "89722c17f028b717e4f23578c05fbebb296088ca8882ac25705e460ad19b6729",
+    "causilo/nn/layers/scaling.py": "2c402cbc00f7f1e943ceec25014b3cc183dc7b56779c68f92479312736367112",
+    "causilo/nn/prediction.py": "080bfddbccf81b65fd4bb8fa8e1dc0d8fe5b1a57f6fc6b40aac6a3d202351747",
+    "causilo/nn/row.py": "4605bb6580ff472b714bfc7ca3547b579a4462635f5647e2d9f6aeb44d15fc52",
+    "causilo/serialization.py": "a7c7bafa15349cb61f7b89d86bfe844439d7beea0cb23ec8d0b5644c608d62d8"
+  },
+  "checkpoint_revision": "94f2bd91db0737d4da59f347910662905ecb5a09",
+  "checkpoint_files_sha256": {
+    "classifier/config.json": "89aa44afe34233013f5c38a7dd89f233d26d18585096fcf32dec250abd48b77d",
+    "classifier/model.safetensors": "2fe50487b33ef6b4ed65d1dab1e48888b86f9ed604317a4b596fea4dd462b7f6",
+    "regressor/config.json": "af78b2d23ac28534ab6c16f75d8d2d2f4dc38ca45c643d70a6324320847480a7",
+    "regressor/model.safetensors": "9a4197d7c1060d187c19b62d4d83c74ce986c1f3911825576eb58c2ae4f0057d"
+  },
+  "tabarena_upstream_commit": "903a377430f6f8ec06680a8a4a8f4db9b98f3e26",
+  "equivalence": "Executable source matches evaluation except the verified checkpoint revision; checkpoint contents match exactly.",
+  "versions": {
+    "tabarena": "0.1.0",
+    "autogluon.tabular": "1.6.2b20260912",
+    "tabicl": "2.1.1",
+    "tabpfn": "8.2.0",
+    "torch": "2.14.0"
+  },
+  "splits_per_model": 816,
+  "official_reference_sha256": "8d3547330f9acb59b5e8608ed8eb0d9dd344dd58db58d638b2b8b6943cf56240"
+}

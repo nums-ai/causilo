@@ -1,0 +1,75 @@
+name: Publish to PyPI
+
+on:
+  workflow_dispatch:
+    inputs:
+      publish:
+        description: Publish the validated distributions to PyPI
+        type: boolean
+        default: false
+
+permissions:
+  contents: read
+
+concurrency:
+  group: pypi-publication
+  cancel-in-progress: false
+
+jobs:
+  build:
+    if: github.ref == 'refs/heads/main'
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.12'
+      - name: Prepare README links for PyPI
+        run: |
+          python - <<'PY'
+          import re
+          from pathlib import Path
+
+          def absolute(match):
+              image, label, target = match.groups()
+              if target.startswith(('https://', 'http://', 'mailto:', '#')):
+                  return match.group(0)
+              base = ('https://raw.githubusercontent.com/nums-ai/causilo/main/' if image
+                      else 'https://github.com/nums-ai/causilo/blob/main/')
+              return f'{image}[{label}]({base}{target})'
+
+          readme = Path('README.md')
+          readme.write_text(re.sub(r'(!?)\[([^\]]+)\]\(([^)]+)\)', absolute, readme.read_text()))
+          PY
+      - name: Build and check distributions
+        run: |
+          python -m pip install build twine
+          python -m build
+          python -m twine check --strict dist/*
+      - name: Test the installed wheel offline
+        run: |
+          python -m pip install torch==2.13.0 --index-url https://download.pytorch.org/whl/cpu
+          python -m pip install dist/*.whl pytest joblib
+          python -m pytest -o pythonpath=
+        env:
+          HF_HUB_OFFLINE: '1'
+      - uses: actions/upload-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+
+  publish:
+    if: inputs.publish
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: pypi
+      url: https://pypi.org/p/causilo
+    permissions:
+      id-token: write
+    steps:
+      - uses: actions/download-artifact@v4
+        with:
+          name: distributions
+          path: dist/
+      - uses: pypa/gh-action-pypi-publish@release/v1
