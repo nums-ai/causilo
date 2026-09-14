@@ -31,7 +31,7 @@ predictions = regressor.predict(X_test)
 
 Inputs can be NumPy arrays or pandas DataFrames, including categorical features and missing feature values. Use pandas categorical dtype for numeric category codes. NumPy object arrays infer numeric columns; strings and Booleans remain categorical. Prediction reuses the fitted schema, including handling unseen categories.
 
-Classification supports up to 10 classes; regression returns point predictions. Targets must not be missing. See runnable [classification](examples/classification.py) and [regression](examples/regression.py) examples.
+Classification supports up to 10 classes. Regression returns mean predictions by default and also supports median and quantile predictions. Targets must not be missing. See runnable [classification](examples/classification.py) and [regression](examples/regression.py) examples.
 
 ## Benchmarks
 
@@ -95,7 +95,7 @@ Times are median seconds per 1,000 rows; memory is mean peak usage during fit on
 
 Refit after changing options. Use `device="cuda:0"` to select a specific GPU, or `CUDA_VISIBLE_DEVICES` to control which GPUs are available.
 
-Ensembles cycle through none, rank2gaussian, robust and power normalization. See [execution details](docs/inference.md) for precision and reproducibility.
+Ensembles cycle through none, rank2gaussian, robust and power normalization. See [inference details](docs/inference.md) for quantile prediction, precision and reproducibility.
 
 ## Repeated prediction
 
