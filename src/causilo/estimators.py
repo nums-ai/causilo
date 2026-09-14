@@ -5,6 +5,7 @@ from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.exceptions import NotFittedError
 
 from .engine import Engine
+from .quantiles import interpolate_quantiles, validate_quantiles
 from .serialization import export_estimator, import_estimator
 
 
@@ -163,6 +164,21 @@ class CausiloRegressor(RegressorMixin, BaseEstimator):
         """
         return fit_adapter(self, X, y, "regression")
 
-    def predict(self, X):
-        """Return (rows,) point predictions in the original target scale."""
-        return fitted_engine(self).predict(X)
+    def predict(self, X, *, output_type: str = "mean", quantiles=None):
+        """Predict in target units using the selected output mode.
+
+        mean (default) and median return (rows,); raw returns (rows, 999).
+        quantiles returns (rows, requested levels) for probabilities in (0, 1).
+        """
+        if not isinstance(output_type, str) or output_type not in ("mean", "median", "raw", "quantiles"):
+            raise ValueError("output_type must be 'mean', 'median', 'raw', or 'quantiles'")
+        if output_type != "quantiles" and quantiles is not None:
+            raise ValueError("quantiles is only valid with output_type='quantiles'")
+        levels = validate_quantiles(quantiles) if output_type == "quantiles" else None
+        engine = fitted_engine(self)
+        if output_type == "mean":
+            return engine.predict(X)
+        raw = engine.predict_raw(X)
+        if output_type == "median":
+            return raw[:, raw.shape[1] // 2]
+        return raw if output_type == "raw" else interpolate_quantiles(raw, levels)

@@ -117,40 +117,56 @@ class Engine:
             raise NotFittedError("Call fit successfully before prediction")
         return self.state
 
-    def predict(self, table) -> np.ndarray:
-        """Return probabilities (queries, classes) or regression points (queries,)."""
-        state = self.require_state()
+    def _member_predictions(self, table, state, reduce_output):
+        """Transform queries and select direct or cached member execution."""
         fitted = state.dataset
         numeric = fitted.encoder.transform(table)
+        transformed = {
+            name: transform.transform(numeric) for name, transform in fitted.normalizers.items()
+        }
+        if state.caches is None:
+            return direct_predictions(self.model, fitted, transformed, self.device, reduce_output)
+        return cached_predictions(
+            self.model, fitted, transformed, state.cached_members(), self.device, reduce_output
+        )
+
+    def predict(self, table) -> np.ndarray:
+        """Return class probabilities or regression point predictions."""
+        state = self.require_state()
         outputs = []
 
         def reduce_output(result):
-            # Preserve the established sorted reduction order for regression.
-            # Sorting is algebraically unnecessary, but changing summation order
-            # can change floating-point results and saved-state reproducibility.
+            # Sorting fixes the floating-point summation order for regression.
             return result if self.task == "classification" else result.sort(dim=-1).values.mean(dim=-1)
 
         with torch.inference_mode():
-            transformed = {
-                name: transform.transform(numeric) for name, transform in fitted.normalizers.items()
-            }
-            if state.caches is None:
-                predictions = direct_predictions(self.model, fitted, transformed, self.device, reduce_output)
-            else:
-                predictions = cached_predictions(
-                    self.model, fitted, transformed, state.cached_members(), self.device, reduce_output
-                )
-            for member, result in predictions:
+            for member, result in self._member_predictions(table, state, reduce_output):
                 if self.task == "classification":
-                    # class_order[original_id] gives the member's output column.
                     outputs.append(result[:, member.class_order].numpy())
                 else:
                     point = result.numpy().astype(np.float64)
-                    outputs.append(fitted.target_encoder.inverse_transform(point[:, None])[:, 0])
+                    outputs.append(state.dataset.target_encoder.inverse_transform(point[:, None])[:, 0])
         combined = np.mean(outputs, axis=0)
         if self.task == "classification":
-            # Ensemble logits before softmax; averaging probabilities would
-            # implement a different prediction policy.
+            # Apply softmax to the ensemble's mean logits.
             probabilities = np.exp(combined - combined.max(axis=-1, keepdims=True))
             return probabilities / probabilities.sum(axis=-1, keepdims=True)
         return combined
+
+    def predict_raw(self, table) -> np.ndarray:
+        """Sort each member, restore target units, then average matching quantiles."""
+        state = self.require_state()
+        if self.task != "regression":
+            raise ValueError("Quantile prediction requires a regression model")
+        outputs = []
+
+        def reduce_output(result):
+            return result.sort(dim=-1).values
+
+        with torch.inference_mode():
+            for _, result in self._member_predictions(table, state, reduce_output):
+                values = result.numpy().astype(np.float64)
+                outputs.append(
+                    state.dataset.target_encoder.inverse_transform(values.reshape(-1, 1)).reshape(values.shape)
+                )
+        return np.mean(outputs, axis=0)
