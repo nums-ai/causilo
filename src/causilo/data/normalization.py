@@ -32,6 +32,36 @@ class Rank2Gaussian:
 
 
 @dataclass
+class PowerNormalizer:
+    """Keep undefined power outputs missing before and after standard scaling."""
+
+    power: PowerTransformer
+    scale: StandardScaler
+
+    @staticmethod
+    def _power_values(power, table):
+        with np.errstate(over="ignore", invalid="ignore"):
+            values = power.transform(table)
+        values[~np.isfinite(values)] = np.nan
+        return values
+
+    @classmethod
+    def fit(cls, table):
+        power = PowerTransformer(standardize=False).fit(table)
+        values = cls._power_values(power, table)
+        with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
+            scale = StandardScaler(copy=False).fit(values)
+        return cls(power, scale)
+
+    def transform(self, table):
+        values = self._power_values(self.power, table)
+        with np.errstate(over="ignore", invalid="ignore"):
+            values = self.scale.transform(values)
+        values[~np.isfinite(values)] = np.nan
+        return values
+
+
+@dataclass
 class Normalizer:
     """Normalize encoded features using statistics fitted only on training rows.
 
@@ -68,7 +98,7 @@ class Normalizer:
         scaled = (filled - center) / spread
         normalizer, quantile_scale = None, None
         if method == "power":
-            normalizer = PowerTransformer().fit(scaled)
+            normalizer = PowerNormalizer.fit(scaled)
         elif method == "robust":
             normalizer = RobustScaler(unit_variance=True).fit(scaled)
         elif method == "rank2gaussian":
@@ -108,6 +138,14 @@ def outlier_bounds(values):
     These thresholds are part of the fixed preprocessing policy. A second pass
     limits how much extreme training values can inflate the final bounds.
     """
+    if np.isnan(values).any():
+        lower, upper = np.zeros(values.shape[1]), np.zeros(values.shape[1])
+        for index, column in enumerate(values.T):
+            observed = column[~np.isnan(column)]
+            if observed.size:
+                bounds = outlier_bounds(observed[:, None])
+                lower[index], upper[index] = bounds[0][0], bounds[1][0]
+        return lower, upper
     correction = int(len(values) > 1)
     preliminary = np.maximum(values.std(axis=0, ddof=correction), 1e-6)
     mean = values.mean(axis=0)
