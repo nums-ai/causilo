@@ -38,6 +38,22 @@ CUDA uses FP16 mixed precision, with regression column stages and both output he
 
 The same inputs and seed reproduce the fitted feature and class permutations without changing global RNG state. Floating-point results can vary with execution device and batch shape; bitwise determinism is not enforced.
 
+## Large inputs without a fitted K/V cache
+
+Causilo first reduces concurrent ensemble members while keeping all query rows.
+If one member still exceeds the memory budget, it chooses query batching or
+column-summary recomputation based on estimated computation cost. All training
+rows and ensemble members are preserved.
+
+Recomputation processes feature groups and rows in tiles, keeping compact
+summaries and row states on the execution device instead of a full hidden
+feature grid. Prediction uses the full training context and retains temporary
+K/V for one layer at a time.
+
+Tile sizes adapt to available memory, and OOM retries shrink failed tiles.
+Retained states and a layer's full training K/V must still fit on the device;
+intermediate CPU offloading is not supported.
+
 ## Restoring a fitted estimator
 
 With `device="auto"`, restoration selects an available device again. An explicitly configured device must be available. Saved state includes fitted preprocessing and optional attention caches, while pretrained weights are loaded from the pinned checkpoint. Use matching Causilo and dependency versions, including the Python major/minor version.
