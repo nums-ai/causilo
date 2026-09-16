@@ -30,10 +30,22 @@ class FeatureEmbedding(nn.Module):
         phase = torch.nan_to_num(grouped, nan=0.0, posinf=0.0, neginf=0.0).unsqueeze(-1)
         phase = phase * (2 * math.pi) * self.frequencies
         waves = torch.cat((phase.sin(), phase.cos()), dim=-1).masked_fill(missing.unsqueeze(-1), 0)
+        del phase, grouped
         magnitude = math.sqrt(self.group_size)
-        signal = self.projection(waves).sum(-2) / magnitude
+        # The projection is shared by the features in a group. Sum its inputs
+        # first so we never materialize (..., groups, group_size, width).
+        # Each original projection contributed its bias, including missing and
+        # padded features, so retain group_size copies of that bias.
+        signal = F.linear(
+            waves.sum(-2), self.projection.weight, self.projection.bias * self.group_size
+        )
+        del waves
+        # Both buffers are newly allocated here; reuse them for scaling and
+        # combination instead of keeping extra full feature grids alive.
+        signal.div_(magnitude)
         absence = missing.to(signal.dtype) @ self.missing.to(signal.dtype)
-        return signal + absence / magnitude
+        absence.div_(magnitude)
+        return signal.add_(absence)
 
 
 class TargetEmbedding(nn.Module):

@@ -64,11 +64,54 @@ class RowBlock(nn.Module):
         self.rounds = nn.ModuleList(RowLayer(width, heads, expansion) for _ in range(depth - 1))
         self.finish = FeatureUpdate(width, heads)
 
-    def forward(self, features: Tensor) -> Tensor:
-        """Return features with the same (*batch, feature_groups, width) layout."""
+    @property
+    def num_latent_states(self) -> int:
+        """Number of intermediate latent states needed to replay feature updates."""
+        return len(self.rounds)
+
+    def _refine(self, features: Tensor, trace: list[Tensor] | None = None) -> tuple[Tensor, Tensor]:
+        """Advance the shared feature/latent recurrence, optionally recording latents."""
         latents = self.latents.to(features).expand(*features.shape[:-2], *self.latents.shape)
         for refinement in self.rounds:
             latents, features = refinement(latents, features)
+            if trace is not None:
+                trace.append(latents)
+        return latents, features
+
+    def forward(self, features: Tensor) -> Tensor:
+        """Return features with the same (*batch, feature_groups, width) layout."""
+        latents, features = self._refine(features)
+        return self.finish(features, latents)
+
+    def capture_latents(self, features: Tensor) -> Tensor:
+        """Capture (*batch, states, row_latents, width) using all feature groups.
+
+        The execution layer owns placement, precision and the lifetime of the
+        returned tensor. No state is stored on the module itself.
+        """
+        trace = []
+        self._refine(features, trace)
+        if not trace:
+            return features.new_empty((*features.shape[:-2], 0, *self.latents.shape))
+        return torch.stack(trace, dim=-3)
+
+    def replay_features(self, features: Tensor, trace: Tensor | None) -> Tensor:
+        """Reconstruct any feature-group subset from the complete row's latent states.
+
+        Batch axes must match; the number of feature groups may differ from
+        the input used by capture_latents(). A block without latent updates
+        also accepts None instead of an empty trace.
+        """
+        expected = (*features.shape[:-2], self.num_latent_states, *self.latents.shape)
+        if trace is None:
+            if self.num_latent_states:
+                raise ValueError("Row replay requires the captured latent states")
+        elif trace.shape != expected:
+            raise ValueError("Row latent trace shape does not match the batch and block")
+        latents = self.latents.to(features).expand(*features.shape[:-2], *self.latents.shape)
+        for index, refinement in enumerate(self.rounds):
+            features = refinement.features(features, latents)
+            latents = trace[..., index, :, :]
         return self.finish(features, latents)
 
 
