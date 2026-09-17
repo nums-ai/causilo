@@ -39,7 +39,7 @@ class PreparedDataset:
         task: str,
         n_estimators: int,
         retain_preprocessing: bool,
-        max_classes: int,
+        max_classes: int | None,
         random_state: int,
     ) -> "PreparedDataset":
         """Fit transforms on training data only; ``max_classes`` applies to classification."""
@@ -56,7 +56,7 @@ class PreparedDataset:
                 raise ValueError("Classification targets must be discrete labels")
             encoder = LabelEncoder().fit(labels)
             classes = len(encoder.classes_)
-            if not 1 <= classes <= max_classes:
+            if classes < 1 or (max_classes is not None and classes > max_classes):
                 raise ValueError(f"Found {classes} classes; this checkpoint supports at most {max_classes}")
             encoded_targets = encoder.transform(labels)
         else:

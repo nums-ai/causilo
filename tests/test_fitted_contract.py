@@ -44,12 +44,66 @@ def test_saved_fit_reuses_state(estimator_type, cache, retain, monkeypatch):
         restored.predict(table[:4])
 
 
-def test_missing_fit_and_unsupported_class_capacity():
+def test_missing_fit():
     estimator = CausiloClassifier(n_estimators=1, device="cpu")
     with pytest.raises(NotFittedError):
         estimator.predict(np.ones((2, 3)))
-    with pytest.raises(ValueError, match="at most 10"):
-        estimator.fit(np.arange(36).reshape(12, 3), np.arange(12))
+
+
+@pytest.mark.parametrize("cache", [False, True])
+@pytest.mark.parametrize("classes", [11, 20])
+@pytest.mark.parametrize("retain", [False, True])
+def test_many_class_fit_prediction_and_restore(cache, classes, retain, monkeypatch):
+    rng = np.random.default_rng(102)
+    table = rng.normal(size=(classes * 4, 5))
+    labels = np.asarray([f"class-{index % classes}" for index in range(len(table))])
+    model = CausiloClassifier(
+        n_estimators=2, device="cpu", use_kv_cache=cache, retain_preprocessing=retain, random_state=19
+    ).fit(table, labels)
+    probabilities = model.predict_proba(table[:5])
+    assert probabilities.shape == (5, classes)
+    assert np.isfinite(probabilities).all()
+    assert np.all(probabilities >= 0)
+    np.testing.assert_allclose(probabilities.sum(axis=1), 1.0)
+    assert set(model.predict(table[:5])).issubset(set(labels))
+    state = model._engine.require_state()
+    assert state.codec.class_count == classes
+    assert (state.code_caches is not None) == cache
+    for dataset in state.code_datasets:
+        assert len(dataset.members) == 2
+        assert dataset.encoder is state.dataset.encoder
+        assert dataset.normalizers is state.dataset.normalizers
+        assert dataset.features is state.dataset.features
+    from causilo.ecoc import ECOCCodec
+
+    monkeypatch.setattr(ECOCCodec, "__post_init__", lambda *args: pytest.fail("Regenerated stored codebook"))
+    monkeypatch.setattr(ModelRunner, "build_cache", lambda *args: pytest.fail("Rebuilt stored K/V"))
+    restored = pickle.loads(pickle.dumps(model))
+    np.testing.assert_array_equal(restored.classes_, model.classes_)
+    np.testing.assert_array_equal(restored.predict_proba(table[:5]), probabilities)
+
+
+def test_incomplete_saved_ecoc_cache_is_rejected():
+    from dataclasses import replace
+
+    x = np.random.default_rng(12).normal(size=(44, 4))
+    model = CausiloClassifier(n_estimators=1, device="cpu", use_kv_cache=True).fit(x, np.arange(44) % 11)
+    saved = model.__getstate__()
+    saved["fitted"] = replace(saved["fitted"], code_caches=saved["fitted"].code_caches[:-1])
+    with pytest.raises(ValueError, match="code row count"):
+        CausiloClassifier().__setstate__(saved)
+
+
+def test_failed_many_class_cache_fit_discards_context(monkeypatch):
+    x = np.random.default_rng(12).normal(size=(44, 4))
+    model = CausiloClassifier(n_estimators=1, device="cpu", use_kv_cache=True).fit(x, np.arange(44) % 3)
+    monkeypatch.setattr(
+        ModelRunner, "build_cache", lambda *args: (_ for _ in ()).throw(RuntimeError("cache"))
+    )
+    with pytest.raises(RuntimeError, match="cache"):
+        model.fit(x, np.arange(44) % 11)
+    with pytest.raises(NotFittedError):
+        model.predict_proba(x[:2])
 
 
 def test_failed_version_check():

@@ -1,6 +1,6 @@
 """Connect fixed pretrained weights to fitted data, caches, and ensemble outputs."""
 
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from numbers import Integral
 
 import numpy as np
@@ -9,7 +9,8 @@ from sklearn.exceptions import NotFittedError
 
 from . import checkpoints
 from .data.dataset import PreparedDataset
-from .data.ensemble import EnsembleMember
+from .data.ensemble import EnsembleMember, make_ensemble_members
+from .ecoc import ECOCCodec
 from .execution.cached import cached_predictions
 from .execution.direct import direct_predictions
 from .execution.runner import ModelCache, ModelRunner
@@ -41,15 +42,22 @@ class FitState:
 
     dataset: PreparedDataset
     caches: tuple[ModelCache, ...] | None
+    codec: ECOCCodec | None = None
+    code_caches: tuple[tuple[ModelCache, ...], ...] | None = None
+    code_datasets: tuple[PreparedDataset, ...] | None = None
 
-    def cached_members(self) -> tuple[tuple[EnsembleMember, ModelCache], ...]:
+    def cached_members(
+        self, caches: tuple[ModelCache, ...] | None = None, dataset: PreparedDataset | None = None
+    ) -> tuple[tuple[EnsembleMember, ModelCache], ...]:
         """Pair every cache with its input permutation, rejecting incomplete state."""
-        if self.caches is None:
+        caches = self.caches if caches is None else caches
+        if caches is None:
             raise ValueError("This fit does not contain K/V caches")
-        members = self.dataset.members_by_normalization()
-        if len(members) != len(self.caches):
+        dataset = self.dataset if dataset is None else dataset
+        members = dataset.members_by_normalization()
+        if len(members) != len(caches):
             raise ValueError("Cache count does not match the fitted ensemble")
-        return tuple(zip(members, self.caches))
+        return tuple(zip(members, caches))
 
 
 class Engine:
@@ -89,21 +97,55 @@ class Engine:
             task=self.task,
             n_estimators=int(n_estimators),
             retain_preprocessing=retain_preprocessing,
-            max_classes=self.model.config.outputs,
+            max_classes=None if self.task == "classification" else self.model.config.outputs,
             random_state=int(random_state),
         )
+        codec = None
+        code_datasets = None
+        if (
+            self.task == "classification"
+            and len(prepared.target_encoder.classes_) > self.model.config.outputs
+        ):
+            codec = ECOCCodec(
+                len(prepared.target_encoder.classes_),
+                self.model.config.outputs,
+                int(random_state),
+            )
+            prepared = replace(
+                prepared,
+                members=make_ensemble_members(
+                    prepared.features.shape[1], codec.symbol_count, int(n_estimators), int(random_state)
+                ),
+            )
+            encoded = codec.encode(prepared.targets)
+            # Share preprocessing and retain all members for every target context.
+            code_datasets = tuple(replace(prepared, targets=row) for row in encoded)
         caches = None
+        code_caches = None
         if use_kv_cache:
             runner = ModelRunner(self.model)
-            collected = []
             with torch.inference_mode():
-                for member in prepared.members_by_normalization():
-                    features = prepared.training_table(member.normalization)[:, member.feature_order]
-                    y = prepared.targets_for(member)
-                    collected.append(runner.build_cache(self._tensor(features), self._tensor(y)))
-            caches = tuple(collected)
+                if codec is None:
+                    caches = self._build_caches(runner, prepared)
+                else:
+                    code_caches = tuple(self._build_caches(runner, dataset) for dataset in code_datasets)
         # Publish only a complete context; partially built caches stay local.
-        self.state = FitState(dataset=prepared, caches=caches)
+        self.state = FitState(
+            dataset=prepared,
+            caches=caches,
+            codec=codec,
+            code_caches=code_caches,
+            code_datasets=code_datasets,
+        )
+
+    def _build_caches(self, runner: ModelRunner, fitted: PreparedDataset) -> tuple[ModelCache, ...]:
+        collected = []
+        for member in fitted.members_by_normalization():
+            features = fitted.training_table(member.normalization)[:, member.feature_order]
+            collected.append(
+                runner.build_cache(self._tensor(features), self._tensor(fitted.targets_for(member)))
+            )
+        return tuple(collected)
 
     def _tensor(self, value: np.ndarray) -> torch.Tensor:
         """Place one member on the device and prepend its singleton batch axis."""
@@ -117,22 +159,44 @@ class Engine:
             raise NotFittedError("Call fit successfully before prediction")
         return self.state
 
-    def _member_predictions(self, table, state, reduce_output):
+    def _member_predictions(self, table, state, reduce_output, *, fitted=None, caches=None):
         """Transform queries and select direct or cached member execution."""
-        fitted = state.dataset
+        fitted = state.dataset if fitted is None else fitted
         numeric = fitted.encoder.transform(table)
-        transformed = {
-            name: transform.transform(numeric) for name, transform in fitted.normalizers.items()
-        }
-        if state.caches is None:
+        transformed = {name: transform.transform(numeric) for name, transform in fitted.normalizers.items()}
+        caches = state.caches if caches is None else caches
+        if caches is None:
             return direct_predictions(self.model, fitted, transformed, self.device, reduce_output)
         return cached_predictions(
-            self.model, fitted, transformed, state.cached_members(), self.device, reduce_output
+            self.model, fitted, transformed, state.cached_members(caches, fitted), self.device, reduce_output
         )
+
+    def _classification_probabilities(self, table, state, *, fitted=None, caches=None) -> np.ndarray:
+        fitted = state.dataset if fitted is None else fitted
+        logits = []
+        for member, result in self._member_predictions(
+            table, state, lambda value: value, fitted=fitted, caches=caches
+        ):
+            logits.append(result[:, member.class_order].numpy())
+        combined = np.mean(logits, axis=0)
+        probabilities = np.exp(combined - combined.max(axis=-1, keepdims=True))
+        return probabilities / probabilities.sum(axis=-1, keepdims=True)
 
     def predict(self, table) -> np.ndarray:
         """Return class probabilities or regression point predictions."""
         state = self.require_state()
+        if self.task == "classification" and state.codec is not None:
+            with torch.inference_mode():
+
+                def row_probabilities():
+                    for index, fitted in enumerate(state.code_datasets):
+                        caches = None if state.code_caches is None else state.code_caches[index]
+                        yield self._classification_probabilities(table, state, fitted=fitted, caches=caches)
+
+                return state.codec.decode_rows(row_probabilities())
+        if self.task == "classification":
+            with torch.inference_mode():
+                return self._classification_probabilities(table, state)
         outputs = []
 
         def reduce_output(result):
@@ -141,16 +205,9 @@ class Engine:
 
         with torch.inference_mode():
             for member, result in self._member_predictions(table, state, reduce_output):
-                if self.task == "classification":
-                    outputs.append(result[:, member.class_order].numpy())
-                else:
-                    point = result.numpy().astype(np.float64)
-                    outputs.append(state.dataset.target_encoder.inverse_transform(point[:, None])[:, 0])
+                point = result.numpy().astype(np.float64)
+                outputs.append(state.dataset.target_encoder.inverse_transform(point[:, None])[:, 0])
         combined = np.mean(outputs, axis=0)
-        if self.task == "classification":
-            # Apply softmax to the ensemble's mean logits.
-            probabilities = np.exp(combined - combined.max(axis=-1, keepdims=True))
-            return probabilities / probabilities.sum(axis=-1, keepdims=True)
         return combined
 
     def predict_raw(self, table) -> np.ndarray:
@@ -167,6 +224,8 @@ class Engine:
             for _, result in self._member_predictions(table, state, reduce_output):
                 values = result.numpy().astype(np.float64)
                 outputs.append(
-                    state.dataset.target_encoder.inverse_transform(values.reshape(-1, 1)).reshape(values.shape)
+                    state.dataset.target_encoder.inverse_transform(values.reshape(-1, 1)).reshape(
+                        values.shape
+                    )
                 )
         return np.mean(outputs, axis=0)

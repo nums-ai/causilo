@@ -1,5 +1,31 @@
 # Inference details
 
+## Classification above ten classes
+
+The classification checkpoint has ten output symbols. When a fitted target contains more than ten
+classes, Causilo deterministically constructs a redundant error-correcting output code from
+`random_state`. Each code row is evaluated as an ordinary classification problem within the native
+head width, and mean log likelihood across active code symbols reconstructs probabilities in the
+original `classes_` order. Classification with at most ten classes retains the direct path.
+
+Many-class prediction runs the native model once per code row, so it is slower than direct
+classification. With `use_kv_cache=True`, fit prepares a separate target-conditioned cache for every
+code row, trading additional device memory and fitted-state size for faster repeated prediction.
+
+Every code row retains the requested `n_estimators` ensemble views. The fixed recipe uses nine
+active classes plus a rest symbol, redundancy four, and up to fifty codebook candidates (one
+candidate above two hundred classes). Each candidate balances active coverage; minimum and then
+mean Hamming distance select the winner. The row budget never falls below `ceil(classes / 9)`:
+11--72 classes use eight rows, 100 classes use twelve, and 1,000 classes use 112. Redundancy is
+limited by the row budget, so it does not guarantee four active appearances for every class.
+
+The codebook and per-row context are saved with the fitted estimator; restoring does not regenerate
+codes or rebuild K/V. Causilo implements the active/rest recipe also used by
+[EXAONE-Tabular](https://github.com/LGAI-Research/EXAONE-Tabular/blob/cf55bd2d74aeb9c0b5d5d4f509d05831251a827e/src/exaonetabular/ecoc.py).
+Code scheduling uses usage-priority ordering, candidate scoring uses active-set co-occurrences,
+and decoding streams each row into a class-score accumulator rather than materializing a
+rows-by-samples-by-classes tensor. No EXAONE package or model weights are required.
+
 ## Regression outputs
 
 For `CausiloRegressor`, choose the prediction output with `output_type`:
