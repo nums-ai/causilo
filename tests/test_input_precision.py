@@ -12,7 +12,13 @@ from causilo.execution.runner import ModelRunner
 def test_target_standardization_preserves_large_offsets():
     table = np.arange(72, dtype=float).reshape(36, 2)
     target = np.arange(36, dtype=np.float64)
-    options = dict(task="regression", n_estimators=1, retain_preprocessing=True, max_classes=9, random_state=42)
+    options = dict(
+        task="regression",
+        n_estimators=1,
+        retain_preprocessing=True,
+        random_state=42,
+        class_permutation_size=0,
+    )
     centered = PreparedDataset.prepare(table, target, **options)
     shifted = PreparedDataset.prepare(table, target + 1e9, **options)
     np.testing.assert_array_equal(centered.targets, shifted.targets)

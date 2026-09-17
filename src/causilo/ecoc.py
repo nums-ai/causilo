@@ -7,10 +7,8 @@ import numpy as np
 
 
 def _row_budget(classes: int, symbols: int) -> int:
-    """Use one coverage pass for large label spaces; otherwise add redundancy."""
+    """Allocate redundant coverage for the candidate-search path."""
     coverage = (classes + symbols - 2) // (symbols - 1)
-    if classes > 200:
-        return coverage
     digits, representable = 0, 1
     while representable < classes:
         digits += 1

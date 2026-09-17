@@ -3,6 +3,7 @@ import pickle
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import joblib
 import numpy as np
@@ -12,6 +13,9 @@ import torch
 from sklearn.exceptions import NotFittedError
 
 from causilo import CausiloClassifier, CausiloRegressor, checkpoints
+from causilo.data.encoding import FeatureEncoder
+from causilo.data.ensemble import make_ensemble_members
+from causilo.data.normalization import Normalizer
 from causilo.execution.runner import ModelRunner
 
 pytestmark = pytest.mark.pretrained
@@ -55,11 +59,22 @@ def test_missing_fit():
 def test_many_class_fit_prediction_and_restore(cache, classes, monkeypatch):
     table = np.random.default_rng(42).normal(size=(max(40, classes), 3))
     labels = np.asarray([f"class-{index % classes}" for index in range(len(table))])
-    model = CausiloClassifier(n_estimators=2, device="cpu", use_kv_cache=cache, random_state=42).fit(
-        table, labels
-    )
+    with patch("causilo.data.dataset.make_ensemble_members", wraps=make_ensemble_members) as members:
+        model = CausiloClassifier(n_estimators=2, device="cpu", use_kv_cache=cache, random_state=42).fit(
+            table, labels
+        )
+    assert members.call_count == 1
+    assert members.call_args.args[1] == 10
     query = table[:3]
-    probabilities = model.predict_proba(query)
+    with (
+        patch.object(
+            FeatureEncoder, "transform", autospec=True, side_effect=FeatureEncoder.transform
+        ) as encode,
+        patch.object(Normalizer, "transform", autospec=True, side_effect=Normalizer.transform) as normalize,
+    ):
+        probabilities = model.predict_proba(query)
+    assert encode.call_count == 1
+    assert normalize.call_count == len(model._engine.state.dataset.normalizers)
     assert probabilities.shape == (len(query), classes)
     assert np.isfinite(probabilities).all() and np.all(probabilities >= 0)
     np.testing.assert_allclose(probabilities.sum(axis=1), 1.0)

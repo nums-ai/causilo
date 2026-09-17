@@ -102,7 +102,7 @@ class CausiloClassifier(ClassifierMixin, BaseEstimator):
         """Prepare a context from X (rows, features) and y (rows,); return self.
 
         No gradient training occurs. Feature NaNs are supported, target NaNs
-        are rejected. The native ten-symbol head uses error-correcting output
+        are rejected. The native head uses error-correcting output
         codes when there are more than ten target classes.
         Parameter changes take effect on refit; a failed refit clears old state.
         """

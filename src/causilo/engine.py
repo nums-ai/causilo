@@ -9,7 +9,7 @@ from sklearn.exceptions import NotFittedError
 
 from . import checkpoints
 from .data.dataset import PreparedDataset
-from .data.ensemble import EnsembleMember, make_ensemble_members
+from .data.ensemble import EnsembleMember
 from .ecoc import ECOCCodec
 from .execution.cached import cached_predictions
 from .execution.direct import direct_predictions
@@ -97,8 +97,8 @@ class Engine:
             task=self.task,
             n_estimators=int(n_estimators),
             retain_preprocessing=retain_preprocessing,
-            max_classes=None if self.task == "classification" else self.model.config.outputs,
             random_state=int(random_state),
+            class_permutation_size=self.model.config.outputs,
         )
         codec = None
         code_datasets = None
@@ -110,12 +110,6 @@ class Engine:
                 len(prepared.target_encoder.classes_),
                 self.model.config.outputs,
                 int(random_state),
-            )
-            prepared = replace(
-                prepared,
-                members=make_ensemble_members(
-                    prepared.features.shape[1], codec.symbol_count, int(n_estimators), int(random_state)
-                ),
             )
             encoded = codec.encode(prepared.targets)
             # Share preprocessing and retain all members for every target context.
@@ -159,11 +153,9 @@ class Engine:
             raise NotFittedError("Call fit successfully before prediction")
         return self.state
 
-    def _member_predictions(self, table, state, reduce_output, *, fitted=None, caches=None):
-        """Transform queries and select direct or cached member execution."""
+    def _member_predictions(self, transformed, state, reduce_output, *, fitted=None, caches=None):
+        """Select direct or cached execution using already transformed queries."""
         fitted = state.dataset if fitted is None else fitted
-        numeric = fitted.encoder.transform(table)
-        transformed = {name: transform.transform(numeric) for name, transform in fitted.normalizers.items()}
         caches = state.caches if caches is None else caches
         if caches is None:
             return direct_predictions(self.model, fitted, transformed, self.device, reduce_output)
@@ -171,11 +163,10 @@ class Engine:
             self.model, fitted, transformed, state.cached_members(caches, fitted), self.device, reduce_output
         )
 
-    def _classification_probabilities(self, table, state, *, fitted=None, caches=None) -> np.ndarray:
-        fitted = state.dataset if fitted is None else fitted
+    def _classification_probabilities(self, transformed, state, *, fitted=None, caches=None) -> np.ndarray:
         logits = []
         for member, result in self._member_predictions(
-            table, state, lambda value: value, fitted=fitted, caches=caches
+            transformed, state, lambda value: value, fitted=fitted, caches=caches
         ):
             logits.append(result[:, member.class_order].numpy())
         combined = np.mean(logits, axis=0)
@@ -185,26 +176,29 @@ class Engine:
     def predict(self, table) -> np.ndarray:
         """Return class probabilities or regression point predictions."""
         state = self.require_state()
+        transformed = state.dataset.query_tables(table)
         if self.task == "classification" and state.codec is not None:
             with torch.inference_mode():
 
                 def row_probabilities():
                     for index, fitted in enumerate(state.code_datasets):
                         caches = None if state.code_caches is None else state.code_caches[index]
-                        yield self._classification_probabilities(table, state, fitted=fitted, caches=caches)
+                        yield self._classification_probabilities(
+                            transformed, state, fitted=fitted, caches=caches
+                        )
 
                 return state.codec.decode_rows(row_probabilities())
         if self.task == "classification":
             with torch.inference_mode():
-                return self._classification_probabilities(table, state)
+                return self._classification_probabilities(transformed, state)
         outputs = []
 
         def reduce_output(result):
             # Sorting fixes the floating-point summation order for regression.
-            return result if self.task == "classification" else result.sort(dim=-1).values.mean(dim=-1)
+            return result.sort(dim=-1).values.mean(dim=-1)
 
         with torch.inference_mode():
-            for member, result in self._member_predictions(table, state, reduce_output):
+            for _, result in self._member_predictions(transformed, state, reduce_output):
                 point = result.numpy().astype(np.float64)
                 outputs.append(state.dataset.target_encoder.inverse_transform(point[:, None])[:, 0])
         combined = np.mean(outputs, axis=0)
@@ -215,13 +209,14 @@ class Engine:
         state = self.require_state()
         if self.task != "regression":
             raise ValueError("Quantile prediction requires a regression model")
+        transformed = state.dataset.query_tables(table)
         outputs = []
 
         def reduce_output(result):
             return result.sort(dim=-1).values
 
         with torch.inference_mode():
-            for _, result in self._member_predictions(table, state, reduce_output):
+            for _, result in self._member_predictions(transformed, state, reduce_output):
                 values = result.numpy().astype(np.float64)
                 outputs.append(
                     state.dataset.target_encoder.inverse_transform(values.reshape(-1, 1)).reshape(

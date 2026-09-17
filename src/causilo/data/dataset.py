@@ -39,10 +39,13 @@ class PreparedDataset:
         task: str,
         n_estimators: int,
         retain_preprocessing: bool,
-        max_classes: int | None,
         random_state: int,
+        class_permutation_size: int,
     ) -> "PreparedDataset":
-        """Fit transforms on training data only; ``max_classes`` applies to classification."""
+        """Fit transforms and build members for the model's output space.
+
+        ``class_permutation_size`` sizes class permutations.
+        """
         labels = np.asarray(targets)
         if labels.ndim == 2 and labels.shape[1] == 1:
             labels = labels[:, 0]
@@ -56,8 +59,8 @@ class PreparedDataset:
                 raise ValueError("Classification targets must be discrete labels")
             encoder = LabelEncoder().fit(labels)
             classes = len(encoder.classes_)
-            if classes < 1 or (max_classes is not None and classes > max_classes):
-                raise ValueError(f"Found {classes} classes; this checkpoint supports at most {max_classes}")
+            if classes < 1:
+                raise ValueError("Classification requires at least one class")
             encoded_targets = encoder.transform(labels)
         else:
             # Center in float64 before reducing precision for model execution.
@@ -67,7 +70,8 @@ class PreparedDataset:
             encoder = StandardScaler().fit(labels[:, None])
             encoded_targets = encoder.transform(labels[:, None])[:, 0].astype(np.float32)
         schema, training = FeatureEncoder.fit(table)
-        members = make_ensemble_members(training.shape[1], classes, n_estimators, random_state)
+        permutation_classes = min(classes, class_permutation_size)
+        members = make_ensemble_members(training.shape[1], permutation_classes, n_estimators, random_state)
         methods = dict.fromkeys(member.normalization for member in members)
         transforms = {method: Normalizer.fit(training, method) for method in methods}
         retained = (
@@ -84,6 +88,11 @@ class PreparedDataset:
             normalizers=transforms,
             normalized_cache=retained,
         )
+
+    def query_tables(self, table) -> dict[str, np.ndarray]:
+        """Transform queries once for all members and output-code rows."""
+        numeric = self.encoder.transform(table)
+        return {name: transform.transform(numeric) for name, transform in self.normalizers.items()}
 
     def training_table(self, method: str) -> np.ndarray:
         """Return normalized training features, recomputing only if not retained."""
