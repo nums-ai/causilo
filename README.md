@@ -31,7 +31,11 @@ predictions = regressor.predict(X_test)
 
 Inputs can be NumPy arrays or pandas DataFrames, including categorical features and missing feature values. Use pandas categorical dtype for numeric category codes. NumPy object arrays infer numeric columns; strings and Booleans remain categorical. Prediction reuses the fitted schema, including handling unseen categories.
 
-Classification supports up to 10 classes. Regression returns mean predictions by default and also supports median and quantile predictions. Targets must not be missing. See runnable [classification](examples/classification.py) and [regression](examples/regression.py) examples.
+The classification checkpoint has a native 10-class head. Datasets with more classes are handled
+automatically through deterministic error-correcting output codes. Regression returns mean predictions
+by default and also supports median and quantile predictions. Targets must not be missing. See
+runnable [classification](examples/classification.py) and [regression](examples/regression.py)
+examples.
 
 ## Benchmarks
 

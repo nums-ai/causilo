@@ -1,8 +1,10 @@
+import io
 import os
 import pickle
 import subprocess
 import sys
 from pathlib import Path
+from unittest.mock import patch
 
 import joblib
 import numpy as np
@@ -12,6 +14,9 @@ import torch
 from sklearn.exceptions import NotFittedError
 
 from causilo import CausiloClassifier, CausiloRegressor, checkpoints
+from causilo.data.encoding import FeatureEncoder
+from causilo.data.ensemble import make_ensemble_members
+from causilo.data.normalization import Normalizer
 from causilo.execution.runner import ModelRunner
 
 pytestmark = pytest.mark.pretrained
@@ -44,12 +49,94 @@ def test_saved_fit_reuses_state(estimator_type, cache, retain, monkeypatch):
         restored.predict(table[:4])
 
 
-def test_missing_fit_and_unsupported_class_capacity():
+def test_missing_fit():
     estimator = CausiloClassifier(n_estimators=1, device="cpu")
     with pytest.raises(NotFittedError):
         estimator.predict(np.ones((2, 3)))
-    with pytest.raises(ValueError, match="at most 10"):
-        estimator.fit(np.arange(36).reshape(12, 3), np.arange(12))
+
+
+@pytest.mark.parametrize("cache", [False, True])
+@pytest.mark.parametrize("classes", [11, 201])
+@pytest.mark.parametrize("serializer", [pickle, joblib], ids=["pickle", "joblib"])
+def test_many_class_fit_prediction_and_restore(cache, classes, serializer, monkeypatch):
+    table = np.random.default_rng(42).normal(size=(max(40, classes), 3))
+    labels = np.asarray([f"class-{index % classes}" for index in range(len(table))])
+    with patch("causilo.data.dataset.make_ensemble_members", wraps=make_ensemble_members) as members:
+        model = CausiloClassifier(n_estimators=2, device="cpu", use_kv_cache=cache, random_state=42).fit(
+            table, labels
+        )
+    assert members.call_count == 1
+    assert members.call_args.args[1] == 10
+    query = table[:3]
+    with (
+        patch.object(
+            FeatureEncoder, "transform", autospec=True, side_effect=FeatureEncoder.transform
+        ) as encode,
+        patch.object(Normalizer, "transform", autospec=True, side_effect=Normalizer.transform) as normalize,
+    ):
+        probabilities = model.predict_proba(query)
+    assert encode.call_count == 1
+    assert normalize.call_count == len(model._engine.state.dataset.normalizers)
+    assert probabilities.shape == (len(query), classes)
+    assert np.isfinite(probabilities).all() and np.all(probabilities >= 0)
+    np.testing.assert_allclose(probabilities.sum(axis=1), 1.0)
+    np.testing.assert_array_equal(model.predict(query), model.classes_[probabilities.argmax(axis=1)])
+    assert all(len(dataset.members) == 2 for dataset in model._engine.state.code_datasets)
+    monkeypatch.setattr(ModelRunner, "build_cache", lambda *args: pytest.fail("Rebuilt stored K/V"))
+    payload = io.BytesIO()
+    serializer.dump(model, payload)
+    payload.seek(0)
+    restored = serializer.load(payload)
+    np.testing.assert_array_equal(restored.classes_, model.classes_)
+    np.testing.assert_array_equal(restored.predict_proba(query), probabilities)
+
+
+@pytest.mark.parametrize("retain", [False, True])
+def test_many_class_joblib_preserves_shared_training_data(retain):
+    table = np.random.default_rng(12).normal(size=(201, 100))
+    model = CausiloClassifier(n_estimators=2, device="cpu", retain_preprocessing=retain).fit(
+        table, np.arange(len(table))
+    )
+    original = model._engine.state
+    payload = io.BytesIO()
+    joblib.dump(model, payload)
+    # Pickle preserves array aliases; joblib must not grow by the number of code rows.
+    assert payload.tell() < 2 * len(pickle.dumps(model))
+    payload.seek(0)
+    restored = joblib.load(payload)._engine.state
+    np.testing.assert_array_equal(restored.codec.codebook, original.codec.codebook)
+    assert not restored.codec.codebook.flags.writeable
+    assert len(restored.code_datasets) == len(original.code_datasets)
+    for before, after in zip(original.code_datasets, restored.code_datasets):
+        np.testing.assert_array_equal(after.targets, before.targets)
+        for name in (
+            "features", "encoder", "target_encoder", "members", "normalizers", "normalized_cache"
+        ):
+            assert getattr(after, name) is getattr(restored.dataset, name)
+    assert bool(restored.dataset.normalized_cache) == retain
+
+
+def test_incomplete_saved_ecoc_cache_is_rejected():
+    from dataclasses import replace
+
+    x = np.random.default_rng(12).normal(size=(44, 4))
+    model = CausiloClassifier(n_estimators=1, device="cpu", use_kv_cache=True).fit(x, np.arange(44) % 11)
+    saved = model.__getstate__()
+    saved["fitted"] = replace(saved["fitted"], code_caches=saved["fitted"].code_caches[:-1])
+    with pytest.raises(ValueError, match="code row count"):
+        CausiloClassifier().__setstate__(saved)
+
+
+def test_failed_many_class_cache_fit_discards_context(monkeypatch):
+    x = np.random.default_rng(12).normal(size=(44, 4))
+    model = CausiloClassifier(n_estimators=1, device="cpu", use_kv_cache=True).fit(x, np.arange(44) % 3)
+    monkeypatch.setattr(
+        ModelRunner, "build_cache", lambda *args: (_ for _ in ()).throw(RuntimeError("cache"))
+    )
+    with pytest.raises(RuntimeError, match="cache"):
+        model.fit(x, np.arange(44) % 11)
+    with pytest.raises(NotFittedError):
+        model.predict_proba(x[:2])
 
 
 def test_failed_version_check():

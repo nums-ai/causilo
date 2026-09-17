@@ -499,7 +499,8 @@ def test_direct_oom_replans_remaining_members_into_recompute(small_model, monkey
     count = targets.shape[1]
     fitted = PreparedDataset.prepare(
         table[0, :count].numpy(), targets[0].numpy(), task=model.config.task,
-        n_estimators=3, retain_preprocessing=True, max_classes=model.config.outputs, random_state=42,
+        n_estimators=3, retain_preprocessing=True, random_state=42,
+        class_permutation_size=model.config.outputs,
     )
     query = fitted.encoder.transform(table[0, count:].numpy())
     transformed = {name: normalizer.transform(query) for name, normalizer in fitted.normalizers.items()}
