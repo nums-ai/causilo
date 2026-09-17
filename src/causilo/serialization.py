@@ -8,6 +8,7 @@ from importlib.metadata import version
 import torch
 
 from . import checkpoints
+from .ecoc import ECOCCodec
 from .engine import Engine, FitState
 from .execution.memory import Stage
 from .execution.precision import stage_dtype
@@ -27,31 +28,41 @@ def runtime_versions() -> dict[str, str]:
 
 def validate_cache_layout(state: FitState, config: ModelConfig) -> None:
     """Check stored layer counts and K/V dimensions before moving caches to a device."""
-    if state.caches is None:
-        return
-    if len(state.caches) != len(state.dataset.members):
-        raise ValueError("Saved cache layout has the wrong ensemble count")
-    groups = math.ceil(state.dataset.features.shape[1] / config.group_size)
+    cache_groups = [] if state.caches is None else [(state.dataset, state.caches)]
+    if state.codec is not None:
+        rows = len(state.codec.codebook)
+        if state.caches is not None or state.code_datasets is None or len(state.code_datasets) != rows:
+            raise ValueError("Saved ECOC state has the wrong context count")
+        if state.code_caches is not None:
+            if len(state.code_caches) != rows:
+                raise ValueError("Saved ECOC cache layout has the wrong code row count")
+            cache_groups.extend(zip(state.code_datasets, state.code_caches))
+    elif state.code_caches is not None or state.code_datasets is not None:
+        raise ValueError("Saved ECOC contexts require a codebook")
     # Column caches have a feature-group axis; prediction caches attend to the
     # entire training-row sequence after feature groups have been pooled.
-    column = (1, groups, config.column_heads, config.column_latents, config.width // config.column_heads)
-    prediction = (
-        1,
-        config.prediction_heads,
-        len(state.dataset.features),
-        config.width * config.row_latents // config.prediction_heads,
-    )
-    for context in state.caches:
-        for saved, depth, dimensions in (
-            (context.columns[0], config.column_depths[0], column),
-            (context.columns[1], config.column_depths[1], column),
-            (context.prediction, config.prediction_depth, prediction),
-        ):
-            if len(saved.layers) != depth or any(
-                tuple(layer.key.shape) != dimensions or tuple(layer.value.shape) != dimensions
-                for layer in saved.layers
+    for dataset, caches in cache_groups:
+        groups = math.ceil(dataset.features.shape[1] / config.group_size)
+        column = (1, groups, config.column_heads, config.column_latents, config.width // config.column_heads)
+        prediction = (
+            1,
+            config.prediction_heads,
+            len(dataset.features),
+            config.width * config.row_latents // config.prediction_heads,
+        )
+        if len(caches) != len(dataset.members):
+            raise ValueError("Saved cache layout has the wrong ensemble count")
+        for context in caches:
+            for saved, depth, dimensions in (
+                (context.columns[0], config.column_depths[0], column),
+                (context.columns[1], config.column_depths[1], column),
+                (context.prediction, config.prediction_depth, prediction),
             ):
-                raise ValueError("Saved cache layout does not match the pretrained architecture")
+                if len(saved.layers) != depth or any(
+                    tuple(layer.key.shape) != dimensions or tuple(layer.value.shape) != dimensions
+                    for layer in saved.layers
+                ):
+                    raise ValueError("Saved cache layout does not match the pretrained architecture")
 
 
 def transfer_state(value, device, *, clone: bool = False, dtype=None):
@@ -64,6 +75,8 @@ def transfer_state(value, device, *, clone: bool = False, dtype=None):
     if isinstance(value, torch.Tensor):
         tensor = value.detach().to(device=device, dtype=dtype if value.is_floating_point() else value.dtype)
         return tensor.clone() if clone else tensor
+    if isinstance(value, ECOCCodec):
+        return value
     if is_dataclass(value) and not isinstance(value, type):
         return type(value)(
             **{
@@ -118,21 +131,33 @@ def import_estimator(estimator, saved: dict) -> None:
         raise ValueError("Saved cache does not match the model shape")
     state = saved["fitted"]
     validate_cache_layout(state, engine.model.config)
-    if state.caches is not None:
+    if state.caches is not None or state.code_caches is not None:
         # Apply the same stage precision policy used by cache construction.
         column_dtype = stage_dtype(engine.task, Stage.COLUMN, engine.device)
         prediction_dtype = stage_dtype(engine.task, Stage.PREDICTION, engine.device)
-        caches = tuple(
-            replace(
-                context,
-                columns=tuple(
-                    transfer_state(column, engine.device, dtype=column_dtype) for column in context.columns
-                ),
-                prediction=transfer_state(context.prediction, engine.device, dtype=prediction_dtype),
+
+        def move(caches):
+            if caches is None:
+                return None
+            return tuple(
+                replace(
+                    context,
+                    columns=tuple(
+                        transfer_state(column, engine.device, dtype=column_dtype)
+                        for column in context.columns
+                    ),
+                    prediction=transfer_state(context.prediction, engine.device, dtype=prediction_dtype),
+                )
+                for context in caches
             )
-            for context in state.caches
+
+        state = replace(
+            state,
+            caches=move(state.caches),
+            code_caches=None
+            if state.code_caches is None
+            else tuple(move(caches) for caches in state.code_caches),
         )
-        state = replace(state, caches=caches)
     engine.state = state
     estimator._engine = engine
     table = engine.state.dataset
