@@ -57,6 +57,7 @@ class CausiloClassifier(ClassifierMixin, BaseEstimator):
     ----------
     n_estimators : int, default=8
         Number of preprocessing/permutation ensemble members, sharing weights.
+        For many-class classification, every output-code row uses this ensemble.
     random_state : int, default=42
         Nonnegative seed for feature and class permutations; None is unsupported.
     device : str, default="auto"
@@ -101,7 +102,8 @@ class CausiloClassifier(ClassifierMixin, BaseEstimator):
         """Prepare a context from X (rows, features) and y (rows,); return self.
 
         No gradient training occurs. Feature NaNs are supported, target NaNs
-        are rejected, and the official checkpoint supports up to ten classes.
+        are rejected. The native ten-symbol head uses error-correcting output
+        codes when there are more than ten target classes.
         Parameter changes take effect on refit; a failed refit clears old state.
         """
         return fit_adapter(self, X, y, "classification")
