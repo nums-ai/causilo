@@ -96,6 +96,11 @@ def export_estimator(estimator) -> dict:
     from . import __version__
 
     engine = getattr(estimator, "_engine", None)
+    state = engine.state if engine is not None else None
+    if state is not None and state.codec is not None:
+        # Code contexts share preprocessing and only differ in encoded targets.
+        # Joblib duplicates aliased NumPy arrays, so persist the common dataset once.
+        state = replace(state, code_datasets=None)
     return {
         "version": __version__,
         "schema": STATE_SCHEMA,
@@ -106,7 +111,7 @@ def export_estimator(estimator) -> dict:
         "model_config": engine.model.config.record()
         if engine is not None and engine.model is not None
         else None,
-        "fitted": transfer_state(engine.state, "cpu", clone=True) if engine is not None else None,
+        "fitted": transfer_state(state, "cpu", clone=True),
     }
 
 
@@ -130,6 +135,13 @@ def import_estimator(estimator, saved: dict) -> None:
     if engine.model.config.record() != saved["model_config"]:
         raise ValueError("Saved cache does not match the model shape")
     state = saved["fitted"]
+    if state.codec is not None and state.code_datasets is None:
+        # Reuse the saved codebook and transforms; neither fitting nor K/V rebuilds
+        # are needed to restore each row's targets and shared preprocessing.
+        encoded = state.codec.encode(state.dataset.targets)
+        state = replace(
+            state, code_datasets=tuple(replace(state.dataset, targets=row) for row in encoded)
+        )
     validate_cache_layout(state, engine.model.config)
     if state.caches is not None or state.code_caches is not None:
         # Apply the same stage precision policy used by cache construction.
