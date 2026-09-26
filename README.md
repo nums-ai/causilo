@@ -2,7 +2,7 @@
 
 Causilo is a pretrained tabular foundation model from Nums AI Inc., supporting classification and regression through a scikit-learn interface.
 
-[Apache-2.0 code](LICENSE) · [Causilo License v1.0 model weights](https://huggingface.co/nums-ai/causilo/blob/main/LICENSE) · [License & contact](#license--contact)
+[Apache-2.0 code](LICENSE) · [Causilo License v1.0 model weights](https://huggingface.co/nums-ai/causilo/blob/main/LICENSE) · [License & contact](#license--contact) · [Technical report](https://arxiv.org/abs/2609.22866)
 
 ## Installation
 
@@ -119,3 +119,19 @@ Saved state includes fitted preprocessing and optional K/V caches, but excludes 
 ## License & contact
 
 Code is licensed under [Apache-2.0](LICENSE); model weights are separately licensed under [Causilo License v1.0](https://huggingface.co/nums-ai/causilo/blob/main/LICENSE). Non-commercial research and free research redistribution are permitted under its conditions. Commercial or production use, and hosted/API/SaaS services whether paid or free, require separate licenses. Contact contact@nums.world.
+
+## Citation
+
+If you use Causilo in research, please cite:
+
+```bibtex
+@misc{cho2026causilotechnicalreport,
+  title={Causilo Technical Report},
+  author={Minyong Cho and Minho Jeong and Dooho Lee and Jinmo Lee and Jaemin Yoo},
+  year={2026},
+  eprint={2609.22866},
+  archivePrefix={arXiv},
+  primaryClass={cs.LG},
+  url={https://arxiv.org/abs/2609.22866},
+}
+```
