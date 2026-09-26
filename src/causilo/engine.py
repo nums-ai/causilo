@@ -21,13 +21,17 @@ def resolve_device(request: str) -> torch.device:
     if request == "auto":
         request = "cuda:0" if torch.cuda.is_available() else "cpu"
     device = torch.device(request)
-    if device.type not in {"cpu", "cuda"}:
-        raise ValueError("Causilo supports CPU or a single CUDA device")
+    if device.type not in {"cpu", "cuda", "mps"}:
+        raise ValueError("Causilo supports CPU, MPS, or a single CUDA device")
     if device.type == "cuda":
         index = device.index if device.index is not None else 0
         if not torch.cuda.is_available() or index >= torch.cuda.device_count():
             raise ValueError(f"Requested CUDA device {index} is unavailable")
         device = torch.device("cuda", index)
+    if device.type == "mps":
+        if device.index not in (None, 0) or not torch.backends.mps.is_available():
+            raise ValueError("Requested MPS device is unavailable")
+        device = torch.device("mps")
     return device
 
 

@@ -12,7 +12,7 @@ Python 3.10–3.12 and PyTorch 2.13+ are required.
 pip install causilo
 ```
 
-The first fit automatically downloads and caches the task's [checkpoint](https://huggingface.co/nums-ai/causilo). `device="auto"` uses CUDA when available, otherwise CPU.
+The first fit automatically downloads and caches the task's [checkpoint](https://huggingface.co/nums-ai/causilo). `device="auto"` uses CUDA when available, otherwise CPU. Set `device="mps"` explicitly to use MPS on macOS.
 
 ## Quick start
 
@@ -93,7 +93,7 @@ Times are median seconds per 1,000 rows; memory is mean peak usage during fit on
 | --- | --- | --- |
 | `n_estimators` | `8` | Number of ensemble members to evaluate |
 | `random_state` | `42` | Nonnegative integer seed for feature and class permutations |
-| `device` | `"auto"` | One available CUDA device, otherwise CPU; explicit `"cpu"` or `"cuda:0"` is supported |
+| `device` | `"auto"` | CUDA when available, otherwise CPU; explicit `"cpu"`, `"mps"`, or `"cuda:0"` is supported |
 | `use_kv_cache` | `False` | Prepare and retain attention keys and values during fit |
 | `retain_preprocessing` | `True` | Retain transformed training tables for later prediction |
 

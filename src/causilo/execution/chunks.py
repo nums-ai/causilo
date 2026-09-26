@@ -8,7 +8,15 @@ import torch
 from torch import Tensor
 
 from ..nn.cache import BlockCache, CacheResult, KVPair
-from .memory import CUDA_MAX_BATCH_ITEMS, MAX_EXECUTION_ATTEMPTS, Stage, Workload, execution_budget
+from .memory import (
+    CUDA_MAX_BATCH_ITEMS,
+    MAX_EXECUTION_ATTEMPTS,
+    Stage,
+    Workload,
+    empty_device_cache,
+    execution_budget,
+    is_out_of_memory,
+)
 
 
 @dataclass
@@ -45,8 +53,7 @@ class ChunkPlan:
         self.failures += 1
         if self.limit == 1 or self.failures >= MAX_EXECUTION_ATTEMPTS:
             raise torch.cuda.OutOfMemoryError("Minimum stage partition or retry limit reached")
-        if self.device.type == "cuda":
-            torch.cuda.empty_cache()
+        empty_device_cache(self.device)
         self.budget = min(self.budget // 2, execution_budget(self.device))
         room = self.budget - self.destination_bytes
         self.limit = min(self.limit - 1, max(1, room // self.item_bytes))
@@ -84,7 +91,9 @@ class ChunkRunner:
                     destination[section] = result
                     del result
                 return destination.reshape(*leading, *destination.shape[1:])
-            except torch.cuda.OutOfMemoryError:
+            except RuntimeError as error:
+                if not is_out_of_memory(error, rows.device):
+                    raise
                 # No failed output may stay live while the next plan is chosen.
                 destination = result = None
             plan.shrink()
@@ -147,7 +156,9 @@ class CacheRunner:
                     del destination, source
                     result = None
                 return CacheResult(training.reshape(*leading, *rows.shape[-2:]), reshape_keys(cache, leading))
-            except torch.cuda.OutOfMemoryError:
+            except RuntimeError as error:
+                if not is_out_of_memory(error, rows.device):
+                    raise
                 training = cache = result = None
             plan.shrink()
 
