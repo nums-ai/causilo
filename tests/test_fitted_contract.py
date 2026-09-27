@@ -153,8 +153,8 @@ def test_invalid_device_refit_discards_previous_context(estimator_type):
     table = np.arange(60).reshape(20, 3)
     target = np.arange(20) % 2
     model.fit(table, target)
-    model.set_params(device="mps")
-    with pytest.raises(ValueError, match="CPU or a single CUDA"):
+    model.set_params(device="xpu")
+    with pytest.raises(ValueError, match="CPU, MPS, or a single CUDA"):
         model.fit(table, target)
     with pytest.raises(NotFittedError):
         model.predict(table[:2])

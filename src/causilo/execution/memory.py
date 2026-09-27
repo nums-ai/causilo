@@ -214,11 +214,30 @@ def available_bytes(device: torch.device) -> int:
     """Count reusable allocator memory, bounded by both physical and process limits."""
     if device.type == "cpu":
         return psutil.virtual_memory().available
+    if device.type == "mps":
+        physical = psutil.virtual_memory().available
+        device_room = torch.mps.recommended_max_memory() - torch.mps.driver_allocated_memory()
+        return max(0, min(physical, device_room))
     free, total = torch.cuda.mem_get_info(device)
     allocated = torch.cuda.memory_allocated(device)
     reusable = torch.cuda.memory_reserved(device) - allocated
     allocator_room = int(total * torch.cuda.get_per_process_memory_fraction(device)) - allocated
     return max(0, min(free + reusable, allocator_room))
+
+
+def is_out_of_memory(error: RuntimeError, device: torch.device) -> bool:
+    """Recognize allocator failures without retrying unrelated runtime errors."""
+    return isinstance(error, torch.cuda.OutOfMemoryError) or (
+        device.type == "mps" and str(error).startswith("MPS backend out of memory")
+    )
+
+
+def empty_device_cache(device: torch.device) -> None:
+    if device.type == "cuda":
+        with torch.cuda.device(device):
+            torch.cuda.empty_cache()
+    elif device.type == "mps":
+        torch.mps.empty_cache()
 
 
 def execution_budget(device: torch.device) -> int:

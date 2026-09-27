@@ -23,6 +23,8 @@ from .memory import (
     MAX_EXECUTION_ATTEMPTS,
     RecomputeMemory,
     Stage,
+    empty_device_cache,
+    is_out_of_memory,
     projection_workspace,
     tile_size,
 )
@@ -52,13 +54,13 @@ class RetryPlan:
         while True:
             try:
                 return operation(self.limit)
-            except torch.cuda.OutOfMemoryError:
+            except RuntimeError as error:
+                if not is_out_of_memory(error, self.device):
+                    raise
                 self.failures += 1
             if self.limit == 1 or self.failures >= MAX_EXECUTION_ATTEMPTS:
                 raise torch.cuda.OutOfMemoryError(self.error_message)
-            if self.device.type == "cuda":
-                with torch.cuda.device(self.device):
-                    torch.cuda.empty_cache()
+            empty_device_cache(self.device)
             self.limit = max(1, self.limit // 2)
             logger.info("Retrying recomputation with tile size %d", self.limit)
 

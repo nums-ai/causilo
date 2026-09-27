@@ -34,7 +34,7 @@ model-head tensors. The `quantiles` argument is only accepted with
 
 ## Precision and reproducibility
 
-CUDA uses FP16 mixed precision, with regression column stages and both output heads in FP32. CPU execution uses FP32. Regression target scaling and output restoration use float64.
+CUDA uses FP16 mixed precision, with regression column stages and both output heads in FP32. CPU and MPS execution use FP32. Regression target scaling and output restoration use float64 on the CPU.
 
 The same inputs and seed reproduce the fitted feature and class permutations without changing global RNG state. Floating-point results can vary with execution device and batch shape; bitwise determinism is not enforced.
 

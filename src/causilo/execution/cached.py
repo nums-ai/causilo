@@ -9,7 +9,15 @@ import torch
 from ..data.dataset import PreparedDataset
 from ..data.ensemble import EnsembleMember
 from ..model import Model, ModelConfig
-from .memory import FP32_BYTES, MAX_EXECUTION_ATTEMPTS, Stage, Workload, execution_budget
+from .memory import (
+    FP32_BYTES,
+    MAX_EXECUTION_ATTEMPTS,
+    Stage,
+    Workload,
+    empty_device_cache,
+    execution_budget,
+    is_out_of_memory,
+)
 from .runner import ModelCache, ModelRunner
 
 
@@ -70,15 +78,16 @@ def cached_predictions(
                     result = reduce_output(runner.predict_cached(table, context))[0].cpu()
                     pieces.append(result)
                     completed = True
-                except torch.cuda.OutOfMemoryError:
+                except RuntimeError as error:
+                    if not is_out_of_memory(error, device):
+                        raise
                     # Drop failed device allocations but keep completed CPU pieces.
                     table = result = None
                 if completed:
                     break
                 if count == 1:
                     raise torch.cuda.OutOfMemoryError("Cached prediction cannot execute a single query")
-                if device.type == "cuda":
-                    torch.cuda.empty_cache()
+                empty_device_cache(device)
                 budget = min(budget // 2, cost(count) - 1)
                 count = max(1, count // 2)
             if not completed:

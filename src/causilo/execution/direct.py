@@ -11,7 +11,16 @@ import torch
 from ..data.dataset import PreparedDataset
 from ..data.ensemble import EnsembleMember
 from ..model import Model, ModelConfig
-from .memory import FP32_BYTES, MAX_EXECUTION_ATTEMPTS, Stage, Workload, embedding_workspace, execution_budget
+from .memory import (
+    FP32_BYTES,
+    MAX_EXECUTION_ATTEMPTS,
+    Stage,
+    Workload,
+    embedding_workspace,
+    empty_device_cache,
+    execution_budget,
+    is_out_of_memory,
+)
 from .recompute import RecomputeRunner
 from .runner import ModelRunner
 
@@ -194,14 +203,16 @@ def direct_predictions(
                     pieces.append(reduce_output(result).cpu())
                     del tensor, result
                 completed = True
-            except torch.cuda.OutOfMemoryError:
+            except RuntimeError as error:
+                if not is_out_of_memory(error, device):
+                    raise
                 # Release device references before empty_cache and replanning.
                 # Clear this batch's outputs so retried rows cannot be duplicated.
                 pieces.clear()
                 tensor = result = target_tensor = None
             if completed:
                 break
-            torch.cuda.empty_cache()
+            empty_device_cache(device)
             budget = min(budget // 2, footprint.estimate(plan.members, plan.queries, device) - 1)
         if not completed:
             raise torch.cuda.OutOfMemoryError("Prediction exhausted its memory recovery attempts")

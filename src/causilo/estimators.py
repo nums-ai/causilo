@@ -61,7 +61,7 @@ class CausiloClassifier(ClassifierMixin, BaseEstimator):
     random_state : int, default=42
         Nonnegative seed for feature and class permutations; None is unsupported.
     device : str, default="auto"
-        CPU or one CUDA device. Auto selects CUDA when available, otherwise CPU.
+        CPU, MPS, or one CUDA device. Auto selects CUDA when available, otherwise CPU.
     use_kv_cache : bool, default=False
         Precompute attention context during fit, retaining it on the device.
     retain_preprocessing : bool, default=True
@@ -128,7 +128,7 @@ class CausiloRegressor(RegressorMixin, BaseEstimator):
     random_state : int, default=42
         Nonnegative seed for feature permutations; None is unsupported.
     device : str, default="auto"
-        CPU or one CUDA device. Auto selects CUDA when available, otherwise CPU.
+        CPU, MPS, or one CUDA device. Auto selects CUDA when available, otherwise CPU.
     use_kv_cache : bool, default=False
         Precompute and retain attention context during fit for repeated prediction.
     retain_preprocessing : bool, default=True
