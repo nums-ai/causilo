@@ -6,7 +6,7 @@ Causilo is a pretrained tabular foundation model from Nums AI Inc., supporting c
 
 ## Installation
 
-Python 3.10–3.12 and PyTorch 2.13+ are required.
+Python 3.10–3.14 and PyTorch 2.13+ are required.
 
 ```bash
 pip install causilo
