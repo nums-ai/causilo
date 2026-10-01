@@ -1,6 +1,8 @@
 # Causilo
 
-![Causilo — Tabular Foundation Model](docs/assets/causilo-logo.png)
+<p align="center">
+  <img src="https://raw.githubusercontent.com/nums-ai/causilo/0ca056d45a44215472bf5f0d17e76347b4f316cd/docs/assets/causilo-logo.png" alt="Causilo — Tabular Foundation Model" width="300">
+</p>
 
 Causilo is a pretrained tabular foundation model from Nums AI Inc., supporting classification and regression through a scikit-learn interface.
 
