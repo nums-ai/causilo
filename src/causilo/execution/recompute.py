@@ -17,7 +17,7 @@ from typing import TypeVar
 import torch
 from torch import Tensor
 
-from ..nn.cache import BlockCache, KVPair
+from ..nn.cache import BlockCache, FrequencyWeights, KVPair
 from .memory import (
     FP32_BYTES,
     MAX_EXECUTION_ATTEMPTS,
@@ -154,7 +154,7 @@ class RecomputeRunner:
             start = stop
         return features
 
-    def _summary_tile(self, table, targets, component, previous, trace):
+    def _summary_tile(self, table, targets, component, previous, trace, weights=None):
         features = self._embed(table.to(self.device), targets, slice(0, targets.shape[1]))
         if previous is not None:
             features = self._apply_columns(features, self.model.columns[0], previous)
@@ -164,16 +164,17 @@ class RecomputeRunner:
         arranged = features.transpose(1, 2)
         del features
         summaries = []
+        options = {} if weights is None else {"weights": weights}
         with stage_autocast(self.model.config.task, Stage.COLUMN, self.device):
             for index, layer in enumerate(component.layers):
-                keys = layer.prepare(arranged)
+                keys = layer.prepare(arranged, **options)
                 summaries.append(keys)
                 # The final broadcast would be discarded; replay it in row passes.
                 if index + 1 < len(component.layers):
                     arranged = layer.broadcast.query(arranged, keys)
         return BlockCache(tuple(summaries))
 
-    def _column_summaries(self, table, targets, component, previous, trace):
+    def _column_summaries(self, table, targets, component, previous, trace, weights=None):
         config = self.model.config
         count = targets.shape[1]
         groups = math.ceil(table.shape[-1] / config.group_size)
@@ -191,7 +192,8 @@ class RecomputeRunner:
             stop = min(start + size, groups)
             selected = _select_columns(previous, slice(start, stop)) if previous is not None else None
             values = table[:, :count, start * config.group_size : stop * config.group_size]
-            return self._summary_tile(values, targets, component, selected, trace), stop
+            options = {} if weights is None else {"weights": weights}
+            return self._summary_tile(values, targets, component, selected, trace, **options), stop
 
         while start < groups:
             piece, stop = retry.run(compute_tile)
@@ -203,12 +205,13 @@ class RecomputeRunner:
             for i in range(len(component.layers))
         ))
 
-    def _encode(self, table: Tensor, targets: Tensor) -> Tensor:
+    def _encode(self, table: Tensor, targets: Tensor, weights: FrequencyWeights | None = None) -> Tensor:
         model, count = self.model, targets.shape[1]
         groups = math.ceil(table.shape[-1] / model.config.group_size)
         per_row = self.memory.row_workspace(groups)
         logger.info("Recompute encoder: first column summaries")
-        first = self._column_summaries(table, targets, model.columns[0], None, None)
+        options = {} if weights is None else {"weights": weights}
+        first = self._column_summaries(table, targets, model.columns[0], None, None, **options)
 
         def trace_rows(part, section):
             features = self._apply_columns(self._embed(part, targets, section), model.columns[0], first)
@@ -220,7 +223,7 @@ class RecomputeRunner:
             limit = self._limit(count, per_row, pending_bytes=self.memory.trace_bytes(count), kernel_limited=True)
             trace = self._map(table[:, :count], trace_rows, axis=1, limit=limit)
         logger.info("Recompute encoder: second column summaries")
-        second = self._column_summaries(table, targets, model.columns[1], first, trace)
+        second = self._column_summaries(table, targets, model.columns[1], first, trace, **options)
 
         def pool_rows(part, section):
             features = self._apply_columns(self._embed(part, targets, section), model.columns[0], first)
@@ -269,8 +272,9 @@ class RecomputeRunner:
 
         return retry.run(build_context)
 
-    def _predict_rows(self, rows: Tensor, targets: Tensor, reduce_output) -> Tensor:
+    def _predict_rows(self, rows: Tensor, targets: Tensor, reduce_output, weights=None) -> Tensor:
         model, count = self.model, targets.shape[1]
+        options = {} if weights is None else {"weights": weights}
         limit = self._limit(rows.shape[1], self.memory.prediction_workspace(count, final=False))
 
         def add_targets(part, section):
@@ -290,19 +294,24 @@ class RecomputeRunner:
                 )
 
                 def query(part, _):
-                    result = layer.query(part, keys)
+                    result = layer.query(part, keys, **options)
                     return reduce_output(model.head(result)) if final else result
 
                 rows = self._map(queries, query, axis=1, limit=limit, inplace=not final)
                 keys = queries = None
         return rows
 
-    def predict(self, table: Tensor, targets: Tensor, reduce_output=lambda value: value) -> Tensor:
+    def predict(
+        self, table: Tensor, targets: Tensor, reduce_output=lambda value: value,
+        frequencies: Tensor | FrequencyWeights | None = None,
+    ) -> Tensor:
         """Return host predictions for one member without retaining a fitted K/V cache."""
         if table.device.type != "cpu" or targets.device.type != "cpu" or table.shape[0] != 1:
             raise ValueError("Recomputation requires one member's inputs on CPU")
         count = targets.shape[1]
         if count < 1 or table.shape[1] <= count:
             raise ValueError("Recomputation requires training and query rows")
-        rows = self._encode(table, targets)
-        return self._predict_rows(rows, targets, reduce_output).cpu()
+        weights = FrequencyWeights.resolve(frequencies, self.device)
+        options = {} if weights is None else {"weights": weights}
+        rows = self._encode(table, targets, **options)
+        return self._predict_rows(rows, targets, reduce_output, **options).cpu()

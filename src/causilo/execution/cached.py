@@ -9,6 +9,7 @@ import torch
 from ..data.dataset import PreparedDataset
 from ..data.ensemble import EnsembleMember
 from ..model import Model, ModelConfig
+from ..nn.cache import FrequencyWeights
 from .memory import (
     FP32_BYTES,
     MAX_EXECUTION_ATTEMPTS,
@@ -39,6 +40,7 @@ def cached_predictions(
     member_contexts: tuple[tuple[EnsembleMember, ModelCache], ...],
     device: torch.device,
     reduce_output: Callable[[torch.Tensor], torch.Tensor],
+    frequencies: FrequencyWeights | None = None,
 ) -> Iterator[tuple[EnsembleMember, torch.Tensor]]:
     """Yield complete CPU outputs for explicit member/cache pairs supplied by FitState.
 
@@ -46,6 +48,9 @@ def cached_predictions(
     OOM; only the current chunk is retried at a smaller size.
     """
     runner = ModelRunner(model)
+    if frequencies is None and fitted.frequencies is not None:
+        frequencies = FrequencyWeights.prepare(torch.from_numpy(fitted.frequencies), device)
+    options = {} if frequencies is None else {"frequencies": frequencies}
     for member, context in member_contexts:
         queries = transformed[member.normalization][:, member.feature_order]
         pieces = []
@@ -75,7 +80,7 @@ def cached_predictions(
                         device=device,
                         dtype=torch.float32,
                     ).unsqueeze(0)
-                    result = reduce_output(runner.predict_cached(table, context))[0].cpu()
+                    result = reduce_output(runner.predict_cached(table, context, **options))[0].cpu()
                     pieces.append(result)
                     completed = True
                 except RuntimeError as error:

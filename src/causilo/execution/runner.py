@@ -11,7 +11,7 @@ import torch
 from torch import Tensor
 
 from ..model import Model
-from ..nn.cache import BlockCache
+from ..nn.cache import BlockCache, FrequencyWeights
 from .chunks import CacheRunner, ChunkRunner
 from .memory import Stage, Workload
 from .precision import stage_autocast
@@ -50,7 +50,9 @@ class ModelRunner:
         self.chunks = ChunkRunner()
         self.cache_runner = CacheRunner()
 
-    def _column(self, component, features: Tensor, count: int) -> Tensor:
+    def _column(
+        self, component, features: Tensor, count: int, weights: FrequencyWeights | None = None
+    ) -> Tensor:
         """Attend over R for each feature group; preserve (B, R, G, D)."""
         if self.model.config.task == "regression":
             features = features.float()
@@ -58,7 +60,10 @@ class ModelRunner:
         # (B, G, R, D): B and G can be partitioned independently, R cannot.
         workload = Workload(Stage.COLUMN, arranged.shape[-2], arranged.shape[-1], count)
         with stage_autocast(self.model.config.task, Stage.COLUMN, features.device):
-            result = self.chunks.run(lambda part: component(part, context_rows=count), arranged, workload)
+            options = {} if weights is None else {"weights": weights}
+            result = self.chunks.run(
+                lambda part: component(part, context_rows=count, **options), arranged, workload
+            )
         return result.transpose(1, 2)
 
     def _row(self, component, features: Tensor, stage: Stage) -> Tensor:
@@ -80,17 +85,21 @@ class ModelRunner:
                 features = inject_targets(features, self.model.feature_target(targets))
             return features
 
-    def predict(self, table: Tensor, targets: Tensor) -> Tensor:
+    def predict(
+        self, table: Tensor, targets: Tensor, frequencies: Tensor | FrequencyWeights | None = None
+    ) -> Tensor:
         """Return raw (B, Q, outputs) scores from table (B, T+Q, features).
 
         Targets have shape (B, T). Only the training prefix supplies attention
         keys/values; queries cannot influence training context or one another.
         """
         model, count = self.model, targets.shape[1]
+        weights = FrequencyWeights.resolve(frequencies, table.device)
+        options = {} if weights is None else {"weights": weights}
         features = self._embed(table, targets)
-        features = self._column(model.columns[0], features, count)
+        features = self._column(model.columns[0], features, count, **options)
         features = self._row(model.row, features, Stage.ROW)
-        features = self._column(model.columns[1], features, count)
+        features = self._column(model.columns[1], features, count, **options)
         rows = self._row(model.pool, features, Stage.POOL)
         del features
         with stage_autocast(model.config.task, Stage.PREDICTION, rows.device):
@@ -103,36 +112,44 @@ class ModelRunner:
                 output_elements=(rows.shape[-2] - count) * rows.shape[-1],
             )
             predicted = self.chunks.run(
-                lambda part: model.prediction(part, context_rows=count), rows, workload
+                lambda part: model.prediction(part, context_rows=count, **options), rows, workload
             )
         return model.head(predicted)
 
-    def build_cache(self, table: Tensor, targets: Tensor) -> ModelCache:
+    def build_cache(
+        self, table: Tensor, targets: Tensor, frequencies: Tensor | FrequencyWeights | None = None
+    ) -> ModelCache:
         """Process training rows once and retain each layer's reusable K/V tensors.
 
         Inputs are (B, T, features) and (B, T); the engine builds one member at
         a time (B=1). Intermediate activations are released after their last use.
         """
         model = self.model
+        weights = FrequencyWeights.resolve(frequencies, table.device)
+        options = {} if weights is None else {"weights": weights}
         features = self._embed(table, targets)
         with stage_autocast(model.config.task, Stage.COLUMN, table.device):
-            first = self.cache_runner.build_column(model.columns[0], features.transpose(1, 2))
+            first = self.cache_runner.build_column(model.columns[0], features.transpose(1, 2), **options)
         first_state = first.cache
         features = self._row(model.row, first.rows.transpose(1, 2), Stage.ROW)
         del first
         with stage_autocast(model.config.task, Stage.COLUMN, table.device):
             context_input = features.float() if model.config.task == "regression" else features
-            second = self.cache_runner.build_column(model.columns[1], context_input.transpose(1, 2))
+            second = self.cache_runner.build_column(model.columns[1], context_input.transpose(1, 2), **options)
         second_state = second.cache
         rows = self._row(model.pool, second.rows.transpose(1, 2), Stage.POOL)
         del second, features, context_input
         with stage_autocast(model.config.task, Stage.PREDICTION, table.device):
             rows = inject_targets(rows, model.row_target(targets))
-            return ModelCache((first_state, second_state), model.prediction.build_context(rows))
+            return ModelCache((first_state, second_state), model.prediction.build_context(rows, **options))
 
-    def predict_cached(self, table: Tensor, state: ModelCache) -> Tensor:
+    def predict_cached(
+        self, table: Tensor, state: ModelCache, frequencies: Tensor | FrequencyWeights | None = None
+    ) -> Tensor:
         """Return (1, Q, outputs) scores for (1, Q, features) using a member's cache."""
         model = self.model
+        weights = FrequencyWeights.resolve(frequencies, table.device)
+        options = {} if weights is None else {"weights": weights}
         features = self._embed(table)
         with stage_autocast(model.config.task, Stage.COLUMN, table.device):
             features = self.cache_runner.query(
@@ -147,5 +164,7 @@ class ModelRunner:
         rows = self._row(model.pool, features, Stage.POOL)
         del features, context_input
         with stage_autocast(model.config.task, Stage.PREDICTION, table.device):
-            prediction = self.cache_runner.query(model.prediction, rows, state.prediction, Stage.PREDICTION)
+            prediction = self.cache_runner.query(
+                model.prediction, rows, state.prediction, Stage.PREDICTION, **options
+            )
         return model.head(prediction)

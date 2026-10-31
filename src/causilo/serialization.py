@@ -8,6 +8,7 @@ from importlib.metadata import version
 import torch
 
 from . import checkpoints
+from .data.frequency import validate_frequencies
 from .ecoc import ECOCCodec
 from .engine import Engine, FitState
 from .execution.memory import Stage
@@ -15,6 +16,7 @@ from .execution.precision import stage_dtype
 from .model import ModelConfig
 
 STATE_SCHEMA = "causilo-fitted-1"
+FREQUENCY_STATE_SCHEMA = "causilo-fitted-2"
 
 
 def runtime_versions() -> dict[str, str]:
@@ -103,7 +105,11 @@ def export_estimator(estimator) -> dict:
         state = replace(state, code_datasets=None)
     return {
         "version": __version__,
-        "schema": STATE_SCHEMA,
+        # Older readers must reject weighted contexts instead of silently
+        # treating compressed rows as single observations.
+        "schema": FREQUENCY_STATE_SCHEMA
+        if state is not None and state.dataset.frequencies is not None
+        else STATE_SCHEMA,
         "dependencies": runtime_versions(),
         "revision": checkpoints.RELEASE_COMMIT,
         "parameters": estimator.get_params(deep=False),
@@ -119,12 +125,22 @@ def import_estimator(estimator, saved: dict) -> None:
     """Restore parameters and fitted context, loading weights but never rebuilding K/V."""
     from . import __version__
 
-    if saved["version"] != __version__ or saved["schema"] != STATE_SCHEMA:
+    if saved["version"] != __version__ or saved["schema"] not in (STATE_SCHEMA, FREQUENCY_STATE_SCHEMA):
         raise ValueError("Restore requires the same Causilo version and fitted-state schema")
     if saved.get("dependencies") != runtime_versions():
         raise ValueError("Restore requires matching Python and dependency versions")
     if saved["revision"] != checkpoints.RELEASE_COMMIT:
         raise ValueError("Saved state belongs to a different pretrained checkpoint")
+    state = saved["fitted"]
+    frequencies = None if state is None else state.dataset.frequencies
+    if saved["schema"] == FREQUENCY_STATE_SCHEMA:
+        if frequencies is None:
+            raise ValueError("Saved frequency-weighted state requires repetition counts")
+        frequencies = validate_frequencies(frequencies, len(state.dataset.features))
+        if (frequencies == 0).any():
+            raise ValueError("Saved frequency-weighted state cannot contain zero-count rows")
+    elif frequencies is not None:
+        raise ValueError("Saved repetition counts require the frequency-weighted state schema")
     estimator.__dict__.update(saved["parameters"])
     if saved["fitted"] is None:
         return
@@ -134,7 +150,6 @@ def import_estimator(estimator, saved: dict) -> None:
     engine.model = checkpoints.load_pretrained_model(engine.task).to(engine.device)
     if engine.model.config.record() != saved["model_config"]:
         raise ValueError("Saved cache does not match the model shape")
-    state = saved["fitted"]
     if state.codec is not None and state.code_datasets is None:
         # Reuse the saved codebook and transforms; neither fitting nor K/V rebuilds
         # are needed to restore each row's targets and shared preprocessing.

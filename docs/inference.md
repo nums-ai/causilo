@@ -57,3 +57,56 @@ intermediate CPU offloading is not supported.
 ## Restoring a fitted estimator
 
 With `device="auto"`, restoration selects an available device again. An explicitly configured device must be available. Saved state includes fitted preprocessing and optional attention caches, while pretrained weights are loaded from the pinned checkpoint. Use matching Causilo and dependency versions, including the Python major/minor version.
+
+## Aggregated observations and repetition counts
+
+Both estimators accept optional `sample_weight` in `fit`. Here a weight is an
+**integer repetition count**: a row with count 30 represents 30 identical
+observations with the same features and target. Counts are not loss weights or
+arbitrary importance scores. Omitting them keeps the usual `fit(X, y)` behavior.
+
+For binomial data, represent each group by a success row and a failure row:
+
+```python
+import numpy as np
+from causilo import CausiloClassifier
+
+# X_group contains one feature row per group; successes and trials are counts.
+# This indexing works for a NumPy feature table.
+rows = np.repeat(np.arange(len(X_group)), 2)
+X = X_group[rows]
+y = np.tile([1, 0], len(X_group))
+counts = np.column_stack([successes, trials - successes]).ravel()
+
+classifier = CausiloClassifier().fit(X, y, sample_weight=counts)
+p_success = classifier.predict_proba(X_test)[:, list(classifier.classes_).index(1)]
+```
+
+For a DataFrame, use `X_group.iloc[rows]` to preserve column names and types.
+This creates at most two rows per group, regardless of its trial count. Different
+observations can only be combined when their features **and target** are identical;
+the estimator does not automatically group rows. Success proportions alone do
+not recover the individual observations when features vary within a group.
+
+Counts must be finite nonnegative integers, one per input row, with a positive
+sum no larger than `2**53`. Integer-valued floats are accepted; fractional values
+are rejected. Zero-count rows are removed before fitting feature mappings,
+classes, or preprocessing. All-one counts use the ordinary unweighted path.
+
+Repetition counts are applied to preprocessing, context attention, and its
+sample-count scaling. Regression also uses them when scaling targets. Many-class
+classification, retained K/V caches, and memory-bounded recomputation use the
+same counts. Predictions agree with explicit row repetition within floating-point
+precision; execution shape and device can change rounding. Savings depend on
+how many repeated observations the compact rows represent.
+
+For rank normalization, missing-value means are computed from distinct observed
+values and their counts in both paths. This prevents tiny summation differences
+from changing tied ranks. Newly fitted models, including unweighted fits, can
+therefore produce different predictions in affected missing-value edge cases.
+Previously saved models retain their fitted filling values and ranks on restore.
+
+Counts are retained in saved fitted estimators. Weighted fits use a new saved-state
+schema so versions without frequency support reject them instead of silently
+ignoring the counts. Existing unweighted fitted states retain their schema and
+remain readable under the existing matching-version requirements.

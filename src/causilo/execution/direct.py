@@ -11,6 +11,7 @@ import torch
 from ..data.dataset import PreparedDataset
 from ..data.ensemble import EnsembleMember
 from ..model import Model, ModelConfig
+from ..nn.cache import FrequencyWeights
 from .memory import (
     FP32_BYTES,
     MAX_EXECUTION_ATTEMPTS,
@@ -161,6 +162,7 @@ def direct_predictions(
     transformed: dict[str, np.ndarray],
     device: torch.device,
     reduce_output: Callable[[torch.Tensor], torch.Tensor],
+    frequencies: FrequencyWeights | None = None,
 ) -> Iterator[tuple[EnsembleMember, torch.Tensor]]:
     """Yield each member with all its query outputs on CPU, in execution order.
 
@@ -172,6 +174,9 @@ def direct_predictions(
     footprint = BatchPlanner(model.config, len(fitted.features), fitted.features.shape[1])
     budget = execution_budget(device)
     runner = ModelRunner(model)
+    if frequencies is None and fitted.frequencies is not None:
+        frequencies = FrequencyWeights.prepare(torch.from_numpy(fitted.frequencies), device)
+    options = {} if frequencies is None else {"frequencies": frequencies}
     start = 0
     while start < len(members):
         completed = False
@@ -183,7 +188,7 @@ def direct_predictions(
                     tables = _feature_batch(fitted, transformed, (member,), slice(0, query_count))
                     targets = np.stack([fitted.targets_for(member)])
                     prediction = recompute.predict(
-                        torch.from_numpy(tables).float(), torch.from_numpy(targets).float(), reduce_output
+                        torch.from_numpy(tables).float(), torch.from_numpy(targets).float(), reduce_output, **options
                     )
                     del tables, targets
                     yield member, prediction[0]
@@ -199,7 +204,7 @@ def direct_predictions(
                         fitted, transformed, selected, slice(offset, offset + plan.queries)
                     )
                     tensor = torch.as_tensor(tables, device=device, dtype=torch.float32)
-                    result = runner.predict(tensor, target_tensor)
+                    result = runner.predict(tensor, target_tensor, **options)
                     pieces.append(reduce_output(result).cpu())
                     del tensor, result
                 completed = True

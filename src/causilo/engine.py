@@ -14,6 +14,7 @@ from .ecoc import ECOCCodec
 from .execution.cached import cached_predictions
 from .execution.direct import direct_predictions
 from .execution.runner import ModelCache, ModelRunner
+from .nn.cache import FrequencyWeights
 
 
 def resolve_device(request: str) -> torch.device:
@@ -83,6 +84,7 @@ class Engine:
         use_kv_cache: bool,
         retain_preprocessing: bool,
         random_state: int,
+        sample_weight=None,
     ) -> None:
         """Prepare context without optimizing weights; a failed fit stays unfitted."""
         self.state = None
@@ -103,6 +105,7 @@ class Engine:
             retain_preprocessing=retain_preprocessing,
             random_state=int(random_state),
             class_permutation_size=self.model.config.outputs,
+            sample_weight=sample_weight,
         )
         codec = None
         code_datasets = None
@@ -121,12 +124,14 @@ class Engine:
         caches = None
         code_caches = None
         if use_kv_cache:
+            frequencies = self._frequency_weights(prepared)
+            options = {} if frequencies is None else {"frequencies": frequencies}
             runner = ModelRunner(self.model)
             with torch.inference_mode():
                 if codec is None:
-                    caches = self._build_caches(runner, prepared)
+                    caches = self._build_caches(runner, prepared, **options)
                 else:
-                    code_caches = tuple(self._build_caches(runner, dataset) for dataset in code_datasets)
+                    code_caches = tuple(self._build_caches(runner, dataset, **options) for dataset in code_datasets)
         # Publish only a complete context; partially built caches stay local.
         self.state = FitState(
             dataset=prepared,
@@ -136,12 +141,23 @@ class Engine:
             code_datasets=code_datasets,
         )
 
-    def _build_caches(self, runner: ModelRunner, fitted: PreparedDataset) -> tuple[ModelCache, ...]:
+    def _frequency_weights(self, fitted: PreparedDataset) -> FrequencyWeights | None:
+        """Prepare execution-only metadata from CPU counts, avoiding device reductions."""
+        if fitted.frequencies is None:
+            return None
+        return FrequencyWeights.prepare(torch.from_numpy(fitted.frequencies), self.device)
+
+    def _build_caches(
+        self, runner: ModelRunner, fitted: PreparedDataset, frequencies: FrequencyWeights | None = None
+    ) -> tuple[ModelCache, ...]:
         collected = []
+        if frequencies is None:
+            frequencies = self._frequency_weights(fitted)
+        options = {} if frequencies is None else {"frequencies": frequencies}
         for member in fitted.members_by_normalization():
             features = fitted.training_table(member.normalization)[:, member.feature_order]
             collected.append(
-                runner.build_cache(self._tensor(features), self._tensor(fitted.targets_for(member)))
+                runner.build_cache(self._tensor(features), self._tensor(fitted.targets_for(member)), **options)
             )
         return tuple(collected)
 
@@ -157,20 +173,27 @@ class Engine:
             raise NotFittedError("Call fit successfully before prediction")
         return self.state
 
-    def _member_predictions(self, transformed, state, reduce_output, *, fitted=None, caches=None):
+    def _member_predictions(
+        self, transformed, state, reduce_output, *, fitted=None, caches=None, frequencies=None
+    ):
         """Select direct or cached execution using already transformed queries."""
         fitted = state.dataset if fitted is None else fitted
         caches = state.caches if caches is None else caches
+        options = {} if frequencies is None else {"frequencies": frequencies}
         if caches is None:
-            return direct_predictions(self.model, fitted, transformed, self.device, reduce_output)
+            return direct_predictions(self.model, fitted, transformed, self.device, reduce_output, **options)
         return cached_predictions(
-            self.model, fitted, transformed, state.cached_members(caches, fitted), self.device, reduce_output
+            self.model, fitted, transformed, state.cached_members(caches, fitted),
+            self.device, reduce_output, **options
         )
 
-    def _classification_probabilities(self, transformed, state, *, fitted=None, caches=None) -> np.ndarray:
+    def _classification_probabilities(
+        self, transformed, state, *, fitted=None, caches=None, frequencies=None
+    ) -> np.ndarray:
         logits = []
+        options = {} if frequencies is None else {"frequencies": frequencies}
         for member, result in self._member_predictions(
-            transformed, state, lambda value: value, fitted=fitted, caches=caches
+            transformed, state, lambda value: value, fitted=fitted, caches=caches, **options
         ):
             logits.append(result[:, member.class_order].numpy())
         combined = np.mean(logits, axis=0)
@@ -181,6 +204,8 @@ class Engine:
         """Return class probabilities or regression point predictions."""
         state = self.require_state()
         transformed = state.dataset.query_tables(table)
+        frequencies = self._frequency_weights(state.dataset)
+        options = {} if frequencies is None else {"frequencies": frequencies}
         if self.task == "classification" and state.codec is not None:
             with torch.inference_mode():
 
@@ -188,13 +213,13 @@ class Engine:
                     for index, fitted in enumerate(state.code_datasets):
                         caches = None if state.code_caches is None else state.code_caches[index]
                         yield self._classification_probabilities(
-                            transformed, state, fitted=fitted, caches=caches
+                            transformed, state, fitted=fitted, caches=caches, **options
                         )
 
                 return state.codec.decode_rows(row_probabilities())
         if self.task == "classification":
             with torch.inference_mode():
-                return self._classification_probabilities(transformed, state)
+                return self._classification_probabilities(transformed, state, **options)
         outputs = []
 
         def reduce_output(result):
@@ -202,7 +227,7 @@ class Engine:
             return result.sort(dim=-1).values.mean(dim=-1)
 
         with torch.inference_mode():
-            for _, result in self._member_predictions(transformed, state, reduce_output):
+            for _, result in self._member_predictions(transformed, state, reduce_output, **options):
                 point = result.numpy().astype(np.float64)
                 outputs.append(state.dataset.target_encoder.inverse_transform(point[:, None])[:, 0])
         combined = np.mean(outputs, axis=0)
@@ -214,13 +239,15 @@ class Engine:
         if self.task != "regression":
             raise ValueError("Quantile prediction requires a regression model")
         transformed = state.dataset.query_tables(table)
+        frequencies = self._frequency_weights(state.dataset)
+        options = {} if frequencies is None else {"frequencies": frequencies}
         outputs = []
 
         def reduce_output(result):
             return result.sort(dim=-1).values
 
         with torch.inference_mode():
-            for _, result in self._member_predictions(transformed, state, reduce_output):
+            for _, result in self._member_predictions(transformed, state, reduce_output, **options):
                 values = result.numpy().astype(np.float64)
                 outputs.append(
                     state.dataset.target_encoder.inverse_transform(values.reshape(-1, 1)).reshape(

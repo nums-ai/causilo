@@ -4,7 +4,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from ..cache import KVPair
+from ..cache import FrequencyWeights, KVPair
 from .feedforward import FeedForward
 from .scaling import QueryScale
 
@@ -58,7 +58,7 @@ class Attention(nn.Module):
         packed = F.linear(rows, self.projection.weight[self.width :], self.projection.bias[self.width :])
         return self._keys(*packed.chunk(2, dim=-1))
 
-    def attend(self, query: Tensor, context: KVPair) -> Tensor:
+    def attend(self, query: Tensor, context: KVPair, weights: FrequencyWeights | None = None) -> Tensor:
         """Attend with projected tensors and return (*batch, queries, width)."""
         if query.shape[-2] == 0:
             return query.new_empty((*query.shape[:-3], 0, self.width))
@@ -68,13 +68,20 @@ class Attention(nn.Module):
         query = query.reshape(-1, *query.shape[-3:])
         key = context.key.reshape(-1, *context.key.shape[-3:])
         value = context.value.reshape(-1, *context.value.shape[-3:])
-        scaled = self.scaling(query, key.shape[-2]) if self.scaling is not None else query
-        result = F.scaled_dot_product_attention(scaled, key, value)
+        count = key.shape[-2] if weights is None else weights.count
+        scaled = self.scaling(query, count) if self.scaling is not None else query
+        if weights is None:
+            result = F.scaled_dot_product_attention(scaled, key, value)
+        else:
+            result = F.scaled_dot_product_attention(
+                scaled, key, value, attn_mask=weights.log_bias.to(dtype=query.dtype),
+            )
         merged = result.transpose(-3, -2).flatten(-2).reshape(*leading, query.shape[-2], self.width)
         return self.output(merged)
 
-    def forward(self, query: Tensor, context: Tensor) -> Tensor:
-        return self.attend(self.prepare_query(query), self.prepare_context(context))
+    def forward(self, query: Tensor, context: Tensor, weights: FrequencyWeights | None = None) -> Tensor:
+        options = {} if weights is None else {"weights": weights}
+        return self.attend(self.prepare_query(query), self.prepare_context(context), **options)
 
 
 class AttentionLayer(nn.Module):
@@ -93,16 +100,18 @@ class AttentionLayer(nn.Module):
         combined = rows + update
         return combined + self.feedforward(self.feedforward_norm(combined))
 
-    def forward(self, rows: Tensor, context: Tensor) -> Tensor:
+    def forward(self, rows: Tensor, context: Tensor, weights: FrequencyWeights | None = None) -> Tensor:
         normalized = self.attention_norm(rows)
         keys = self.attention_norm(context)
-        return self._finish(rows, self.attention(normalized, keys))
+        options = {} if weights is None else {"weights": weights}
+        return self._finish(rows, self.attention(normalized, keys, **options))
 
     def prepare(self, context: Tensor) -> KVPair:
         """Normalize and project the context exactly as in direct forward execution."""
         return self.attention.prepare_context(self.attention_norm(context))
 
-    def query(self, rows: Tensor, context: KVPair) -> Tensor:
+    def query(self, rows: Tensor, context: KVPair, weights: FrequencyWeights | None = None) -> Tensor:
         """Apply the full residual layer using already prepared context K/V."""
         projected = self.attention.prepare_query(self.attention_norm(rows))
-        return self._finish(rows, self.attention.attend(projected, context))
+        options = {} if weights is None else {"weights": weights}
+        return self._finish(rows, self.attention.attend(projected, context, **options))
