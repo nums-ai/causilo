@@ -9,6 +9,7 @@ from sklearn.utils.multiclass import type_of_target
 
 from .encoding import FeatureEncoder
 from .ensemble import EnsembleMember, make_ensemble_members
+from .frequency import validate_frequencies
 from .normalization import Normalizer
 
 
@@ -29,6 +30,7 @@ class PreparedDataset:
     members: tuple[EnsembleMember, ...]
     normalizers: dict[str, Normalizer]
     normalized_cache: dict[str, np.ndarray]
+    frequencies: np.ndarray | None = None
 
     @classmethod
     def prepare(
@@ -41,6 +43,7 @@ class PreparedDataset:
         retain_preprocessing: bool,
         random_state: int,
         class_permutation_size: int,
+        sample_weight=None,
     ) -> "PreparedDataset":
         """Fit transforms and build members for the model's output space.
 
@@ -51,6 +54,15 @@ class PreparedDataset:
             labels = labels[:, 0]
         if labels.ndim != 1 or len(labels) != len(table):
             raise ValueError("Targets must contain one value per training row")
+        frequencies = None
+        if sample_weight is not None:
+            frequencies = validate_frequencies(sample_weight, len(table))
+            keep = frequencies > 0
+            table = table.iloc[keep] if isinstance(table, pd.DataFrame) else np.asarray(table)[keep]
+            labels, frequencies = labels[keep], frequencies[keep]
+            # Unit frequencies follow the original execution and preprocessing paths.
+            if np.all(frequencies == 1):
+                frequencies = None
         if pd.isna(labels).any():
             raise ValueError("Targets cannot contain missing values")
         classes = 0
@@ -67,13 +79,15 @@ class PreparedDataset:
             labels = labels.astype(np.float64)
             if not np.isfinite(labels).all():
                 raise ValueError("Regression targets must be finite")
-            encoder = StandardScaler().fit(labels[:, None])
+            encoder = StandardScaler().fit(labels[:, None], sample_weight=frequencies)
             encoded_targets = encoder.transform(labels[:, None])[:, 0].astype(np.float32)
-        schema, training = FeatureEncoder.fit(table)
+        schema, training = FeatureEncoder.fit(
+            table, effective_rows=None if frequencies is None else int(frequencies.sum())
+        )
         permutation_classes = min(classes, class_permutation_size)
         members = make_ensemble_members(training.shape[1], permutation_classes, n_estimators, random_state)
         methods = dict.fromkeys(member.normalization for member in members)
-        transforms = {method: Normalizer.fit(training, method) for method in methods}
+        transforms = {method: Normalizer.fit(training, method, sample_weight=frequencies) for method in methods}
         retained = (
             {method: transform.transform(training) for method, transform in transforms.items()}
             if retain_preprocessing
@@ -87,6 +101,7 @@ class PreparedDataset:
             members=members,
             normalizers=transforms,
             normalized_cache=retained,
+            frequencies=frequencies,
         )
 
     def query_tables(self, table) -> dict[str, np.ndarray]:

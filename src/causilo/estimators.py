@@ -9,7 +9,7 @@ from .quantiles import interpolate_quantiles, validate_quantiles
 from .serialization import export_estimator, import_estimator
 
 
-def fit_adapter(estimator, X, y, task):
+def fit_adapter(estimator, X, y, task, sample_weight=None):
     """Invalidate old fitted attributes before replacing the engine's context."""
     for name in ("classes_", "n_features_in_", "feature_names_in_"):
         estimator.__dict__.pop(name, None)
@@ -26,6 +26,7 @@ def fit_adapter(estimator, X, y, task):
         use_kv_cache=estimator.use_kv_cache,
         retain_preprocessing=estimator.retain_preprocessing,
         random_state=estimator.random_state,
+        sample_weight=sample_weight,
     )
     state = engine.require_state().dataset
     estimator.n_features_in_ = state.encoder.width
@@ -98,15 +99,20 @@ class CausiloClassifier(ClassifierMixin, BaseEstimator):
         self.use_kv_cache = use_kv_cache
         self.retain_preprocessing = retain_preprocessing
 
-    def fit(self, X, y):
+    def fit(self, X, y, sample_weight=None):
         """Prepare a context from X (rows, features) and y (rows,); return self.
 
         No gradient training occurs. Feature NaNs are supported, target NaNs
         are rejected. The native head uses error-correcting output
         codes when there are more than ten target classes.
         Parameter changes take effect on refit; a failed refit clears old state.
+
+        sample_weight optionally gives nonnegative integer repetition counts,
+        one per row. Zero-count rows are ignored. Counts reproduce repeated
+        observations without expanding the table; fractional importance weights
+        are unsupported. Omitting counts preserves the ordinary fit behavior.
         """
-        return fit_adapter(self, X, y, "classification")
+        return fit_adapter(self, X, y, "classification", sample_weight)
 
     def predict_proba(self, X):
         """Return (rows, classes) probabilities using the fitted feature schema."""
@@ -159,12 +165,15 @@ class CausiloRegressor(RegressorMixin, BaseEstimator):
         self.use_kv_cache = use_kv_cache
         self.retain_preprocessing = retain_preprocessing
 
-    def fit(self, X, y):
+    def fit(self, X, y, sample_weight=None):
         """Prepare X (rows, features) and finite y (rows,) without weight updates.
 
         Return self. Feature NaNs are supported; a failed refit clears old state.
+        sample_weight optionally supplies nonnegative integer repetition counts
+        per row, including for target scaling. Zero-count rows are ignored;
+        fractional importance weights are unsupported.
         """
-        return fit_adapter(self, X, y, "regression")
+        return fit_adapter(self, X, y, "regression", sample_weight)
 
     def predict(self, X, *, output_type: str = "mean", quantiles=None):
         """Predict in target units using the selected output mode.
