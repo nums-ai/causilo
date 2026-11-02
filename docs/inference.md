@@ -79,9 +79,7 @@ fitted K/V cache, it can also recompute intermediate values to reduce memory use
 Large contexts can still exceed device memory.
 
 `use_kv_cache=True` speeds up repeated prediction by retaining a cache for each
-table and ensemble member, at the cost of additional device memory. Use the
-[batch benchmark](../examples/benchmark_batched.py) to compare the tradeoff on
-your workload and hardware.
+table and ensemble member, at the cost of additional device memory.
 
 ## Restoring a fitted estimator
 
