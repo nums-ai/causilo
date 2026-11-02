@@ -18,36 +18,33 @@ class PredictionBlock(nn.Module):
         )
 
     def forward(
-        self, rows: Tensor, *, context_rows: int, weights: FrequencyWeights | None = None
+        self, rows: Tensor, *, context_rows: int, weights: FrequencyWeights | None = None, key_lengths: Tensor | None = None
     ) -> Tensor:
         """Map (*batch, training + queries, width) to (*batch, queries, width)."""
-        options = {} if weights is None else {"weights": weights}
         for index, layer in enumerate(self.layers):
             keys = layer.prepare(rows[..., :context_rows, :])
             # Earlier layers must advance training rows to prepare the next K/V;
             # the final layer needs only query outputs.
             queries = rows[..., context_rows:, :] if index == len(self.layers) - 1 else rows
-            rows = layer.query(queries, keys, **options)
+            rows = layer.query(queries, keys, weights=weights, key_lengths=key_lengths)
         return rows
 
     def build_context(self, training: Tensor, weights: FrequencyWeights | None = None) -> BlockCache:
         """Save K/V before each training update, omitting the unused final update."""
         cache = []
-        options = {} if weights is None else {"weights": weights}
         for index, layer in enumerate(self.layers):
             keys = layer.prepare(training)
             cache.append(keys)
             if index + 1 < len(self.layers):
-                training = layer.query(training, keys, **options)
+                training = layer.query(training, keys, weights=weights)
         return BlockCache(tuple(cache))
 
-    def query(self, rows: Tensor, state: BlockCache, weights: FrequencyWeights | None = None) -> Tensor:
+    def query(self, rows: Tensor, state: BlockCache, weights: FrequencyWeights | None = None, *, key_lengths: Tensor | None = None) -> Tensor:
         """Run query rows through saved contexts without updating the training state."""
         if len(state.layers) != len(self.layers):
             raise ValueError("Prediction cache depth does not match the model")
-        options = {} if weights is None else {"weights": weights}
         for layer, keys in zip(self.layers, state.layers):
-            rows = layer.query(rows, keys, **options)
+            rows = layer.query(rows, keys, weights=weights, key_lengths=key_lengths)
         return rows
 
 

@@ -8,6 +8,7 @@ import pytest
 import torch
 
 from causilo import CausiloClassifier, CausiloRegressor
+from causilo.execution import batched
 from causilo.execution.direct import BatchPlan, BatchPlanner
 
 pytestmark = pytest.mark.pretrained
@@ -44,7 +45,8 @@ def test_official_frequency_fit_matches_expansion(kind, cache, monkeypatch):
     restored = pickle.loads(pickle.dumps(weighted))
     np.testing.assert_array_equal(predict(restored), predict(weighted))
     if not cache:
-        monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(1, 2, mode="recompute"))
+        monkeypatch.setattr(batched, "_fits_budget", lambda *args: False)
+        monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(2, mode="recompute"))
         np.testing.assert_allclose(predict(weighted), expected, atol=2e-4, rtol=2e-4)
 
 
@@ -63,5 +65,6 @@ def test_official_missing_mean_rank_ties_match_expansion(tie, cache, monkeypatch
     expected = expanded.predict_proba(query)
     np.testing.assert_allclose(weighted.predict_proba(query), expected, atol=2e-5, rtol=2e-5)
     if not cache:
-        monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(1, 2, mode="recompute"))
+        monkeypatch.setattr(batched, "_fits_budget", lambda *args: False)
+        monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(2, mode="recompute"))
         np.testing.assert_allclose(weighted.predict_proba(query), expected, atol=2e-5, rtol=2e-5)

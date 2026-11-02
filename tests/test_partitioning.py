@@ -13,14 +13,15 @@ def test_partition_preserves_shape_and_order(monkeypatch):
     torch.testing.assert_close(result, value.sum(-2), rtol=0, atol=0)
 
 
-def test_oom_restarts_without_partial_results(monkeypatch):
+@pytest.mark.parametrize("error_type", [torch.cuda.OutOfMemoryError, RuntimeError])
+def test_oom_restarts_without_partial_results(monkeypatch, error_type):
     monkeypatch.setattr(chunks, "execution_budget", lambda device: 100_000)
     observed = []
 
     def operation(value):
         observed.append(len(value))
         if len(value) > 2:
-            raise torch.cuda.OutOfMemoryError("injected execution failure")
+            raise error_type("DefaultCPUAllocator: can't allocate memory: you tried to allocate 1024 bytes")
         return value + 3
 
     value = torch.arange(8 * 5 * 4).reshape(8, 5, 4).float()

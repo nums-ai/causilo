@@ -152,36 +152,53 @@ class ECOCCodec:
         Auxiliary storage is O(query rows * classes), not O(code rows * query
         rows * classes). Rest probabilities do not contribute to class scores.
         """
-        scores = None
-        appearances = np.zeros(self.class_count, dtype=np.int64)
-        consumed = 0
-        for index, values in enumerate(row_probabilities):
-            if index >= len(self.codebook):
-                raise ValueError("ECOC probabilities have too many code rows")
-            probabilities = np.asarray(values, dtype=np.float64)
-            if probabilities.ndim != 2 or probabilities.shape[1] != self.symbol_count:
-                raise ValueError("Each ECOC probability row must have shape (query rows, output symbols)")
-            if scores is None:
-                scores = np.zeros((len(probabilities), self.class_count), dtype=np.float64)
-            elif len(probabilities) != len(scores):
-                raise ValueError("ECOC probability rows must have the same query count")
-            if not np.isfinite(probabilities).all() or np.any(probabilities < 0):
-                raise ValueError("ECOC probabilities must be finite and nonnegative")
-            # Scaling before summing also accepts unnormalized finite weights
-            # whose direct sum would overflow. Normal probabilities are unchanged.
-            largest = probabilities.max(axis=1, keepdims=True)
-            if np.any(largest <= 0):
-                raise ValueError("ECOC probability rows must have positive sums")
-            scaled = probabilities / largest
-            normalized = scaled / scaled.sum(axis=1, keepdims=True)
-            classes = np.flatnonzero(self.codebook[index] != self.rest_symbol)
-            symbols = self.codebook[index, classes]
-            scores[:, classes] += np.log(np.maximum(normalized[:, symbols], 1e-12))
-            appearances[classes] += 1
-            consumed += 1
-        if consumed != len(self.codebook):
+        accumulator = ECOCAccumulator(self)
+        for values in row_probabilities:
+            accumulator.add(values)
+        return accumulator.finish()
+
+
+class ECOCAccumulator:
+    """Consume ordered code rows, allowing independent tables to be interleaved."""
+
+    def __init__(self, codec: ECOCCodec):
+        self.codec = codec
+        self.scores = None
+        self.appearances = np.zeros(codec.class_count, dtype=np.int64)
+        self.consumed = 0
+
+    def add(self, values: np.ndarray) -> None:
+        codec = self.codec
+        if self.consumed >= len(codec.codebook):
+            raise ValueError("ECOC probabilities have too many code rows")
+        probabilities = np.asarray(values, dtype=np.float64)
+        if probabilities.ndim != 2 or probabilities.shape[1] != codec.symbol_count:
+            raise ValueError("Each ECOC probability row must have shape (query rows, output symbols)")
+        if self.scores is None:
+            self.scores = np.zeros((len(probabilities), codec.class_count), dtype=np.float64)
+        elif len(probabilities) != len(self.scores):
+            raise ValueError("ECOC probability rows must have the same query count")
+        if not np.isfinite(probabilities).all() or np.any(probabilities < 0):
+            raise ValueError("ECOC probabilities must be finite and nonnegative")
+        # Scaling before summing also accepts unnormalized finite weights
+        # whose direct sum would overflow. Normal probabilities are unchanged.
+        largest = probabilities.max(axis=1, keepdims=True)
+        if np.any(largest <= 0):
+            raise ValueError("ECOC probability rows must have positive sums")
+        scaled = probabilities / largest
+        normalized = scaled / scaled.sum(axis=1, keepdims=True)
+        classes = np.flatnonzero(codec.codebook[self.consumed] != codec.rest_symbol)
+        symbols = codec.codebook[self.consumed, classes]
+        self.scores[:, classes] += np.log(np.maximum(normalized[:, symbols], 1e-12))
+        self.appearances[classes] += 1
+        self.consumed += 1
+
+    def finish(self) -> np.ndarray:
+        """Normalize the completed scores once, transferring them to the caller."""
+        if self.consumed != len(self.codec.codebook):
             raise ValueError("ECOC probabilities have too few code rows")
-        scores /= appearances
+        scores = self.scores
+        scores /= self.appearances
         scores -= scores.max(axis=1, keepdims=True)
         np.exp(scores, out=scores)
         scores /= scores.sum(axis=1, keepdims=True)

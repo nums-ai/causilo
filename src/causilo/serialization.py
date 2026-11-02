@@ -17,6 +17,14 @@ from .model import ModelConfig
 
 STATE_SCHEMA = "causilo-fitted-1"
 FREQUENCY_STATE_SCHEMA = "causilo-fitted-2"
+BATCH_STATE_SCHEMA = "causilo-batched-fitted-1"
+
+
+def compact_state(state):
+    if state is not None and state.codec is not None:
+        # Reconstruct target-only ECOC views after loading, avoiding joblib copies.
+        return replace(state, code_datasets=None)
+    return state
 
 
 def runtime_versions() -> dict[str, str]:
@@ -94,24 +102,26 @@ def transfer_state(value, device, *, clone: bool = False, dtype=None):
 
 
 def export_estimator(estimator) -> dict:
-    """Return a versioned fitted payload; identify weights by revision rather than copying them."""
+    """Return fitted context and its weight identity without copying model weights."""
     from . import __version__
 
     engine = getattr(estimator, "_engine", None)
     state = engine.state if engine is not None else None
-    if state is not None and state.codec is not None:
-        # Code contexts share preprocessing and only differ in encoded targets.
-        # Joblib duplicates aliased NumPy arrays, so persist the common dataset once.
-        state = replace(state, code_datasets=None)
+    batched = engine is not None and engine.batch_states is not None
+    state = (
+        {key: compact_state(value) for key, value in engine.batch_states.items()}
+        if batched else compact_state(state)
+    )
+    schema = BATCH_STATE_SCHEMA if batched else STATE_SCHEMA
+    if not batched and state is not None and state.dataset.frequencies is not None:
+        # Older readers must not silently treat compressed rows as single observations.
+        schema = FREQUENCY_STATE_SCHEMA
     return {
         "version": __version__,
-        # Older readers must reject weighted contexts instead of silently
-        # treating compressed rows as single observations.
-        "schema": FREQUENCY_STATE_SCHEMA
-        if state is not None and state.dataset.frequencies is not None
-        else STATE_SCHEMA,
+        "schema": schema,
         "dependencies": runtime_versions(),
         "revision": checkpoints.RELEASE_COMMIT,
+        "checkpoint": engine.checkpoint.copy() if state is not None and engine.checkpoint else None,
         "parameters": estimator.get_params(deep=False),
         "task": engine.task if engine is not None else None,
         "model_config": engine.model.config.record()
@@ -125,31 +135,64 @@ def import_estimator(estimator, saved: dict) -> None:
     """Restore parameters and fitted context, loading weights but never rebuilding K/V."""
     from . import __version__
 
-    if saved["version"] != __version__ or saved["schema"] not in (STATE_SCHEMA, FREQUENCY_STATE_SCHEMA):
+    if saved["version"] != __version__ or saved["schema"] not in {STATE_SCHEMA, FREQUENCY_STATE_SCHEMA, BATCH_STATE_SCHEMA}:
         raise ValueError("Restore requires the same Causilo version and fitted-state schema")
     if saved.get("dependencies") != runtime_versions():
         raise ValueError("Restore requires matching Python and dependency versions")
     if saved["revision"] != checkpoints.RELEASE_COMMIT:
         raise ValueError("Saved state belongs to a different pretrained checkpoint")
     state = saved["fitted"]
-    frequencies = None if state is None else state.dataset.frequencies
-    if saved["schema"] == FREQUENCY_STATE_SCHEMA:
-        if frequencies is None:
-            raise ValueError("Saved frequency-weighted state requires repetition counts")
-        frequencies = validate_frequencies(frequencies, len(state.dataset.features))
-        if (frequencies == 0).any():
-            raise ValueError("Saved frequency-weighted state cannot contain zero-count rows")
-    elif frequencies is not None:
-        raise ValueError("Saved repetition counts require the frequency-weighted state schema")
-    estimator.__dict__.update(saved["parameters"])
+    if saved["schema"] == BATCH_STATE_SCHEMA:
+        if not isinstance(state, dict) or not state or any(
+            not isinstance(key, str) or not key or not isinstance(value, FitState)
+            for key, value in state.items()
+        ):
+            raise ValueError("Saved batch must contain string IDs and fitted contexts")
+        contexts = state.values()
+    else:
+        contexts = (state,)
+    for context in contexts:
+        frequencies = None if context is None else context.dataset.frequencies
+        if saved["schema"] == FREQUENCY_STATE_SCHEMA:
+            if frequencies is None:
+                raise ValueError("Saved frequency-weighted state requires repetition counts")
+            frequencies = validate_frequencies(frequencies, len(context.dataset.features))
+            if (frequencies == 0).any():
+                raise ValueError("Saved frequency-weighted state cannot contain zero-count rows")
+        elif frequencies is not None:
+            raise ValueError("Saved repetition counts require the frequency-weighted state schema")
+    from .estimators import invalidate_fit, publish_fitted_attributes
+
+    invalidate_fit(estimator)
+    estimator.__dict__.pop("_engine", None)
+    estimator.__dict__.update({"checkpoint_path": None, **saved["parameters"]})
     if saved["fitted"] is None:
         return
+    if "checkpoint" not in saved and estimator.checkpoint_path is not None:
+        raise ValueError("Saved local checkpoint is missing its fitted weight identity")
     # Auto resolves again on the current host; an explicit unavailable device
     # is rejected by Engine before any context is installed.
-    engine = Engine(saved["task"], estimator.device)
-    engine.model = checkpoints.load_pretrained_model(engine.task).to(engine.device)
+    # Fitted context belongs to the source used during fit, even if set_params
+    # selected a different source for the next fit. Older payloads used the Hub.
+    checkpoint = saved.get("checkpoint")
+    path = checkpoint["path"] if checkpoint is not None else None
+    engine = Engine(saved["task"], estimator.device, path)
+    model, engine.checkpoint = checkpoints.load_model(
+        engine.task, path, expected_digest=checkpoint["digest"] if checkpoint is not None else None,
+    )
+    engine.model = model.to(engine.device)
     if engine.model.config.record() != saved["model_config"]:
         raise ValueError("Saved cache does not match the model shape")
+    if saved["schema"] == BATCH_STATE_SCHEMA:
+        engine.batch_states = {key: restore_state(value, engine) for key, value in state.items()}
+    else:
+        engine.state = restore_state(saved["fitted"], engine)
+    estimator._engine = engine
+    publish_fitted_attributes(estimator)
+
+
+def restore_state(state: FitState, engine: Engine) -> FitState:
+    """Validate and move a fitted context without rebuilding preprocessing or K/V."""
     if state.codec is not None and state.code_datasets is None:
         # Reuse the saved codebook and transforms; neither fitting nor K/V rebuilds
         # are needed to restore each row's targets and shared preprocessing.
@@ -185,14 +228,4 @@ def import_estimator(estimator, saved: dict) -> None:
             if state.code_caches is None
             else tuple(move(caches) for caches in state.code_caches),
         )
-    engine.state = state
-    estimator._engine = engine
-    table = engine.state.dataset
-    estimator.n_features_in_ = table.encoder.width
-    if table.encoder.names is not None:
-        import numpy as np
-
-        if all(isinstance(name, str) for name in table.encoder.names):
-            estimator.feature_names_in_ = np.asarray(table.encoder.names, dtype=object)
-    if engine.task == "classification":
-        estimator.classes_ = table.target_encoder.classes_
+    return state

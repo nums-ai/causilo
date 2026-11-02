@@ -5,20 +5,49 @@ from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.exceptions import NotFittedError
 
 from .engine import Engine
-from .quantiles import interpolate_quantiles, validate_quantiles
+from .outputs import validate_regression_output
 from .serialization import export_estimator, import_estimator
 
 
-def fit_adapter(estimator, X, y, task, sample_weight=None):
-    """Invalidate old fitted attributes before replacing the engine's context."""
-    for name in ("classes_", "n_features_in_", "feature_names_in_"):
+def invalidate_fit(estimator):
+    """Discard both fitted modes before validating or preparing a replacement."""
+    for name in (
+        "classes_", "n_features_in_", "feature_names_in_", "classes_batched_",
+        "n_features_in_batched_", "feature_names_in_batched_",
+    ):
         estimator.__dict__.pop(name, None)
     engine = getattr(estimator, "_engine", None)
     if engine is not None:
         engine.state = None
-    if engine is None or engine.device_request != estimator.device:
-        engine = Engine(task, estimator.device)
-        estimator._engine = engine
+        engine.batch_states = None
+
+
+def publish_fitted_attributes(estimator):
+    """Expose schema metadata only after the complete fit has succeeded."""
+    engine = estimator._engine
+    if engine.batch_states is not None:
+        datasets = {key: state.dataset for key, state in engine.batch_states.items()}
+        estimator.n_features_in_batched_ = {key: data.encoder.width for key, data in datasets.items()}
+        estimator.feature_names_in_batched_ = {
+            key: np.asarray(data.encoder.names, dtype=object)
+            for key, data in datasets.items()
+            if data.encoder.names is not None and all(isinstance(name, str) for name in data.encoder.names)
+        }
+        if engine.task == "classification":
+            estimator.classes_batched_ = {key: data.target_encoder.classes_ for key, data in datasets.items()}
+        return
+    state = engine.require_state().dataset
+    estimator.n_features_in_ = state.encoder.width
+    if state.encoder.names is not None and all(isinstance(name, str) for name in state.encoder.names):
+        estimator.feature_names_in_ = np.asarray(state.encoder.names, dtype=object)
+    if engine.task == "classification":
+        estimator.classes_ = state.target_encoder.classes_
+
+
+def fit_adapter(estimator, X, y, task, sample_weight=None):
+    """Invalidate old fitted attributes before replacing the engine's context."""
+    invalidate_fit(estimator)
+    engine = engine_for_fit(estimator, task)
     engine.fit(
         X,
         y,
@@ -28,13 +57,20 @@ def fit_adapter(estimator, X, y, task, sample_weight=None):
         random_state=estimator.random_state,
         sample_weight=sample_weight,
     )
-    state = engine.require_state().dataset
-    estimator.n_features_in_ = state.encoder.width
-    if state.encoder.names is not None and all(isinstance(name, str) for name in state.encoder.names):
-        estimator.feature_names_in_ = np.asarray(state.encoder.names, dtype=object)
-    if task == "classification":
-        estimator.classes_ = state.target_encoder.classes_
+    publish_fitted_attributes(estimator)
     return estimator
+
+
+def engine_for_fit(estimator, task):
+    engine = getattr(estimator, "_engine", None)
+    if (
+        engine is None
+        or engine.device_request != estimator.device
+        or engine.checkpoint_path != estimator.checkpoint_path
+    ):
+        engine = Engine(task, estimator.device, estimator.checkpoint_path)
+        estimator._engine = engine
+    return engine
 
 
 def fitted_engine(estimator):
@@ -67,6 +103,9 @@ class CausiloClassifier(ClassifierMixin, BaseEstimator):
         Precompute attention context during fit, retaining it on the device.
     retain_preprocessing : bool, default=True
         Keep transformed training tables instead of recomputing them for prediction.
+    checkpoint_path : str or path-like, default=None
+        Manually downloaded classifier ``model.safetensors`` (or its directory), with
+        ``config.json`` beside it. None downloads the pinned checkpoint from the Hub.
 
     Attributes
     ----------
@@ -92,12 +131,14 @@ class CausiloClassifier(ClassifierMixin, BaseEstimator):
         device: str = "auto",
         use_kv_cache: bool = False,
         retain_preprocessing: bool = True,
+        checkpoint_path=None,
     ):
         self.n_estimators = n_estimators
         self.random_state = random_state
         self.device = device
         self.use_kv_cache = use_kv_cache
         self.retain_preprocessing = retain_preprocessing
+        self.checkpoint_path = checkpoint_path
 
     def fit(self, X, y, sample_weight=None):
         """Prepare a context from X (rows, features) and y (rows,); return self.
@@ -123,6 +164,33 @@ class CausiloClassifier(ClassifierMixin, BaseEstimator):
         probabilities = self.predict_proba(X)
         return self.classes_[probabilities.argmax(axis=1)]
 
+    def fit_batched(self, tables):
+        """Fit independent contexts from {table_id: (X, y)}; return self.
+
+        String IDs connect contexts to queries. A refit replaces all contexts;
+        failure invalidates both single-table and batched fitted state.
+        """
+        from .batch import fit_batched
+
+        return fit_batched(self, tables, "classification")
+
+    def predict_proba_batched(self, tables):
+        """Return {table_id: probabilities} for any subset of fitted IDs.
+
+        Values are query tables. Columns follow classes_batched_[table_id].
+        """
+        from .batch import predict_batched
+
+        return predict_batched(self, tables)
+
+    def predict_batched(self, tables):
+        """Return {table_id: labels}, preserving the input ID order."""
+        probabilities = self.predict_proba_batched(tables)
+        return {
+            key: self.classes_batched_[key][values.argmax(axis=1)]
+            for key, values in probabilities.items()
+        }
+
 
 class CausiloRegressor(RegressorMixin, BaseEstimator):
     """Predict one continuous target using a fixed pretrained context model.
@@ -139,6 +207,9 @@ class CausiloRegressor(RegressorMixin, BaseEstimator):
         Precompute and retain attention context during fit for repeated prediction.
     retain_preprocessing : bool, default=True
         Retain transformed training tables; encoded training data is always kept.
+    checkpoint_path : str or path-like, default=None
+        Manually downloaded regressor ``model.safetensors`` (or its directory), with
+        ``config.json`` beside it. None downloads the pinned checkpoint from the Hub.
 
     Fitted attributes are n_features_in_ and, for DataFrames with string column
     names, feature_names_in_. Change settings before fit or refit to apply them.
@@ -158,20 +229,21 @@ class CausiloRegressor(RegressorMixin, BaseEstimator):
         device: str = "auto",
         use_kv_cache: bool = False,
         retain_preprocessing: bool = True,
+        checkpoint_path=None,
     ):
         self.n_estimators = n_estimators
         self.random_state = random_state
         self.device = device
         self.use_kv_cache = use_kv_cache
         self.retain_preprocessing = retain_preprocessing
+        self.checkpoint_path = checkpoint_path
 
     def fit(self, X, y, sample_weight=None):
         """Prepare X (rows, features) and finite y (rows,) without weight updates.
 
         Return self. Feature NaNs are supported; a failed refit clears old state.
-        sample_weight optionally supplies nonnegative integer repetition counts
-        per row, including for target scaling. Zero-count rows are ignored;
-        fractional importance weights are unsupported.
+        sample_weight optionally gives nonnegative integer repetition counts;
+        zero-count rows are ignored and fractional weights are unsupported.
         """
         return fit_adapter(self, X, y, "regression", sample_weight)
 
@@ -181,15 +253,22 @@ class CausiloRegressor(RegressorMixin, BaseEstimator):
         mean (default) and median return (rows,); raw returns (rows, 999).
         quantiles returns (rows, requested levels) for probabilities in (0, 1).
         """
-        if not isinstance(output_type, str) or output_type not in ("mean", "median", "raw", "quantiles"):
-            raise ValueError("output_type must be 'mean', 'median', 'raw', or 'quantiles'")
-        if output_type != "quantiles" and quantiles is not None:
-            raise ValueError("quantiles is only valid with output_type='quantiles'")
-        levels = validate_quantiles(quantiles) if output_type == "quantiles" else None
-        engine = fitted_engine(self)
-        if output_type == "mean":
-            return engine.predict(X)
-        raw = engine.predict_raw(X)
-        if output_type == "median":
-            return raw[:, raw.shape[1] // 2]
-        return raw if output_type == "raw" else interpolate_quantiles(raw, levels)
+        levels = validate_regression_output(output_type, quantiles)
+        return fitted_engine(self).predict(X, output_type=output_type, levels=levels)
+
+    def fit_batched(self, tables):
+        """Fit independent contexts from {table_id: (X, y)}; return self."""
+        from .batch import fit_batched
+
+        return fit_batched(self, tables, "regression")
+
+    def predict_batched(self, tables):
+        """Predict any subset of fitted IDs, with independent output settings.
+
+        Each value is X (mean output), or a mapping with X, output_type and
+        optional quantiles. Output types and quantile rules match predict().
+        Returns {table_id: array} in input ID order.
+        """
+        from .batch import predict_batched
+
+        return predict_batched(self, tables)

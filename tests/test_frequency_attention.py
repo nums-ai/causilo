@@ -114,6 +114,27 @@ def test_large_counts_are_logged_before_half_precision_conversion():
     torch.testing.assert_close(actual, expected, atol=2e-3, rtol=2e-3)
 
 
+def test_frequency_totals_and_padding_lengths_have_separate_roles():
+    with torch.random.fork_rng():
+        torch.manual_seed(19)
+        attention = Attention(8, 2).eval()
+        query = torch.randn(2, 2, 4, 4)
+        key = torch.randn(2, 2, 3, 4)
+        value = torch.randn_like(key)
+    # Two observed rows represent five observations; the third slot is padding.
+    counts = torch.tensor([2, 3, 0])
+    index = torch.repeat_interleave(torch.arange(3), counts)
+    key[..., 2, :] = 1000
+    value[..., 2, :] = -1000
+    weights = FrequencyWeights.prepare(counts, torch.device("cpu"))
+    with torch.inference_mode():
+        expected = attention.attend(query, KVPair(key[..., index, :], value[..., index, :]))
+        actual = attention.attend(
+            query, KVPair(key, value), weights=weights, key_lengths=torch.tensor([2, 2]),
+        )
+    torch.testing.assert_close(actual, expected, atol=2e-6, rtol=2e-6)
+
+
 def test_weighted_attention_does_not_mutate_model_or_unweighted_execution(model):
     table, targets, frequencies, _, _ = inputs()
     runner = ModelRunner(model)

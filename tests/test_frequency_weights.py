@@ -15,6 +15,7 @@ from sklearn.exceptions import NotFittedError
 from sklearn.pipeline import Pipeline
 
 from causilo import CausiloClassifier, CausiloRegressor, checkpoints
+from causilo.execution import batched
 from causilo.execution.direct import BatchPlan, BatchPlanner
 from causilo.execution.runner import ModelRunner
 from causilo.model import Model, ModelConfig
@@ -138,7 +139,8 @@ def test_weighted_partitioning_and_recompute(kind, mode, monkeypatch):
     table, targets, weights, query = data()
     model = kind(n_estimators=4, device="cpu").fit(table, targets, weights)
     expected = predict(model, query)
-    monkeypatch.setattr(BatchPlanner, "choose", lambda *a: BatchPlan(1, 2, mode=mode))
+    monkeypatch.setattr(batched, "_fits_budget", lambda *args: False)
+    monkeypatch.setattr(BatchPlanner, "choose", lambda *a: BatchPlan(2, mode=mode))
     np.testing.assert_allclose(predict(model, query), expected, atol=3e-5, rtol=3e-5)
 
 

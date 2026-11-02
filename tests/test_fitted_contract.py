@@ -164,6 +164,7 @@ def test_invalid_device_refit_discards_previous_context(estimator_type):
 
 @pytest.mark.parametrize("estimator_type", [CausiloClassifier, CausiloRegressor])
 def test_ensemble_and_query_partition_preserve_predictions(estimator_type, monkeypatch):
+    from causilo.execution import batched
     from causilo.execution.direct import BatchPlan, BatchPlanner
 
     rng = np.random.default_rng(63)
@@ -172,8 +173,18 @@ def test_ensemble_and_query_partition_preserve_predictions(estimator_type, monke
     model = estimator_type(n_estimators=4, device="cpu").fit(table, target)
     predict = model.predict_proba if estimator_type is CausiloClassifier else model.predict
     expected = predict(table[:7])
-    monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(1, 2))
+    monkeypatch.setattr(batched, "execution_budget", lambda device: 1)
+    monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(2))
+    original = ModelRunner.predict
+    chunks = []
+
+    def observed(runner, features, targets):
+        chunks.append(features.shape[1] - targets.shape[1])
+        return original(runner, features, targets)
+
+    monkeypatch.setattr(ModelRunner, "predict", observed)
     np.testing.assert_allclose(predict(table[:7]), expected, atol=2e-4, rtol=2e-4)
+    assert max(chunks) <= 2 and sum(chunks) == 4 * 7
 
 
 def test_prediction_oom_reselects_ensemble_and_preserves_result(monkeypatch):
@@ -356,3 +367,36 @@ def test_restore_rejects_dependency_mismatch_before_loading_weights(dependency, 
     )
     with pytest.raises(ValueError, match="dependency versions"):
         CausiloClassifier().__setstate__(saved)
+
+
+def official_weights(task):
+    folder = "classifier" if task == "classification" else "regressor"
+    root = checkpoints.snapshot_download(
+        checkpoints.REPOSITORY,
+        revision=checkpoints.RELEASE_COMMIT,
+        allow_patterns=[f"{folder}/config.json", f"{folder}/model.safetensors"],
+    )
+    return Path(root) / folder / "model.safetensors"
+
+
+@pytest.mark.parametrize(
+    "estimator_type, task", [(CausiloClassifier, "classification"), (CausiloRegressor, "regression")]
+)
+@pytest.mark.parametrize("as_directory", [False, True])
+def test_local_checkpoint_matches_official_and_restores(
+    estimator_type, task, as_directory, tmp_path, monkeypatch
+):
+    weights = official_weights(task)
+    for name in ("config.json", "model.safetensors"):
+        (tmp_path / name).symlink_to(weights.with_name(name).resolve())
+    rng = np.random.default_rng(5)
+    table = rng.normal(size=(30, 4))
+    target = np.arange(30) % 3
+    expected = estimator_type(n_estimators=1, device="cpu").fit(table, target).predict(table[:5])
+    monkeypatch.setattr(checkpoints, "snapshot_download", lambda *a, **k: pytest.fail("Used the Hub"))
+    path = tmp_path if as_directory else str(tmp_path / "model.safetensors")
+    model = estimator_type(n_estimators=1, device="cpu", checkpoint_path=path).fit(table, target)
+    np.testing.assert_array_equal(expected, model.predict(table[:5]))
+    restored = pickle.loads(pickle.dumps(model))
+    assert restored.checkpoint_path == path
+    np.testing.assert_array_equal(expected, restored.predict(table[:5]))

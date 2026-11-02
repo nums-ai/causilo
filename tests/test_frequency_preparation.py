@@ -8,9 +8,9 @@ import pytest
 import torch
 
 from causilo import CausiloClassifier, CausiloRegressor, checkpoints
-from causilo.execution import cached
-from causilo.execution.cached import cached_predictions
-from causilo.execution.direct import BatchPlan, BatchPlanner, direct_predictions
+from causilo.execution import batched, cached
+from causilo.execution.cached import predict_cached
+from causilo.execution.direct import BatchPlan, BatchPlanner, predict_direct
 from causilo.execution.recompute import RecomputeRunner
 from causilo.execution.runner import ModelRunner
 from causilo.model import Model, ModelConfig
@@ -70,11 +70,12 @@ def test_one_preparation_per_fit_or_predict_across_members_chunks_and_codes(
 
     predict = fitted.predict if task == "regression" else fitted.predict_proba
     expected = predict(table[:4])
+    monkeypatch.setattr(batched, "_fits_budget", lambda *args: False)
     if mode == "cached":
         monkeypatch.setattr(cached, "execution_budget", lambda device: 1)
         monkeypatch.setattr(cached, "query_memory", lambda config, features, training, queries, device: queries)
     else:
-        monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(1, 1, mode=mode))
+        monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(1, mode=mode))
     method = "predict_cached" if mode == "cached" else "predict"
     runner = RecomputeRunner if mode == "recompute" else ModelRunner
     original = getattr(runner, method)
@@ -115,7 +116,7 @@ def test_unweighted_execution_does_not_prepare_metadata(data_and_model, monkeypa
 
 
 @pytest.mark.parametrize("cache", [False, True])
-def test_standalone_prediction_iterator_prepares_once(data_and_model, monkeypatch, cache):
+def test_standalone_member_prediction_prepares_once(data_and_model, monkeypatch, cache):
     table, counts = data_and_model
     fitted = CausiloClassifier(n_estimators=4, device="cpu", use_kv_cache=cache).fit(
         table, np.arange(len(table)) % 3, counts,
@@ -126,16 +127,17 @@ def test_standalone_prediction_iterator_prepares_once(data_and_model, monkeypatc
     calls = track_preparation(monkeypatch)
     with torch.inference_mode():
         if cache:
-            results = list(cached_predictions(
-                engine.model, state.dataset, transformed, state.cached_members(), engine.device, lambda x: x,
-            ))
+            member, context = next(iter(state.cached_members()))
+            result = predict_cached(
+                engine.model, state.dataset, transformed, member, context, engine.device, lambda x: x,
+            )
         else:
-            monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(1, 1))
-            results = list(direct_predictions(
-                engine.model, state.dataset, transformed, engine.device, lambda x: x,
-            ))
-    assert len(results) == 4
-    assert all(torch.isfinite(result).all() for _, result in results)
+            member = next(iter(state.dataset.members_by_normalization()))
+            monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(1))
+            result = predict_direct(
+                engine.model, state.dataset, transformed, member, engine.device, lambda x: x,
+            )
+    assert result.shape[0] == 3 and torch.isfinite(result).all()
     assert len(calls) == 1 and calls[0]() is None
 
 

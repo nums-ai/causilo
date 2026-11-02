@@ -103,7 +103,24 @@ Times are median seconds per 1,000 rows; memory is mean peak usage during fit on
 
 Refit after changing options. Use `device="cuda:0"` to select a specific GPU, or `CUDA_VISIBLE_DEVICES` to control which GPUs are available.
 
-Ensembles cycle through none, rank2gaussian, robust and power normalization. See [inference details](docs/inference.md) for quantile prediction, precision and reproducibility.
+Ensembles cycle through none, rank2gaussian, robust and power normalization. See [inference details](docs/inference.md) for quantile prediction, precision, reproducibility, and [local checkpoints](docs/inference.md#local-checkpoints).
+
+## Independent table batches
+
+Fit independent tables with string IDs, sharing model weights. Tables may have
+different row counts, feature counts, and classes.
+
+```python
+regressor.fit_batched({
+    "sales": (X_train_sales, y_train_sales),
+    "price": (X_train_price, y_train_price),
+})
+predictions = regressor.predict_batched({"sales": X_test_sales, "price": X_test_price})
+```
+
+Classifiers also provide `predict_batched` and `predict_proba_batched`. See
+[batch inference](docs/inference.md#independent-table-batches) for ID matching,
+per-table output options, and fitted-state behavior.
 
 ## Repeated prediction
 

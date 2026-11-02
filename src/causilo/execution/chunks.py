@@ -117,10 +117,10 @@ class CacheRunner:
 
     def build_column(self, component, rows, weights: FrequencyWeights | None = None) -> CacheResult:
         """Return updated training rows and K/V tensors in their original batch layout."""
-        options = {} if weights is None else {"weights": weights}
         leading = rows.shape[:-2]
         items = math.prod(leading)
         packed = rows.reshape(items, *rows.shape[-2:])
+        options = {} if weights is None else {"weights": weights}
         retained_keys = sum(2 * layer.latents.numel() for layer in component.layers)
         workload = Workload(
             Stage.COLUMN, rows.shape[-2], rows.shape[-1], rows.shape[-2], cache_elements=retained_keys
@@ -163,16 +163,19 @@ class CacheRunner:
                 training = cache = result = None
             plan.shrink()
 
-    def query(self, component, rows, state: BlockCache, stage: Stage, weights: FrequencyWeights | None = None):
+    def query(self, component, rows, state: BlockCache, stage: Stage, weights: FrequencyWeights | None = None, *, key_lengths: Tensor | None = None):
         """Select matching K/V items for each query chunk; retain the full context axis."""
-        options = {} if weights is None else {"weights": weights}
         keys = reshape_keys(state, (-1,))
+        lengths = None if key_lengths is None else key_lengths.expand(rows.shape[:-2]).reshape(-1)
         workload = Workload(stage, rows.shape[-2], rows.shape[-1], keys.layers[0].key.shape[-2])
 
         def apply(part, section):
             selected = BlockCache(
                 tuple(KVPair(layer.key[section], layer.value[section]) for layer in keys.layers)
             )
+            options = {} if weights is None else {"weights": weights}
+            if lengths is not None:
+                options["key_lengths"] = lengths[section]
             return component.query(part, selected, **options)
 
         return ChunkRunner().run_indexed(apply, rows, workload)
