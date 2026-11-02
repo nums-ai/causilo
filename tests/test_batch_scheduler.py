@@ -50,7 +50,7 @@ def with_caches(model, items):
 
 def collect(model, items, device):
     pairs = list(batched_predictions(model, items, device))
-    assert len(pairs) == len(items)
+    assert [item.key for item, _ in pairs] == [item.key for item in items]
     assert len({item.key for item, _ in pairs}) == len(items)
     return {item.key: values for item, values in pairs}
 
@@ -79,7 +79,8 @@ def test_scheduler_fuses_and_preserves_item_identity(setup, cache, monkeypatch):
 
 
 @pytest.mark.parametrize("cache", [False, True])
-def test_oom_splits_without_losing_or_duplicating_outputs(setup, cache, monkeypatch):
+@pytest.mark.parametrize("error_type", [MemoryError, torch.cuda.OutOfMemoryError])
+def test_oom_splits_without_losing_or_duplicating_outputs(setup, cache, error_type, monkeypatch):
     model, items, device = setup
     if cache:
         items = with_caches(model, items)
@@ -90,7 +91,7 @@ def test_oom_splits_without_losing_or_duplicating_outputs(setup, cache, monkeypa
     def fail_large(model, items, device):
         attempted.append(len(items))
         if len(items) > 2:
-            raise torch.cuda.OutOfMemoryError("injected multi-table OOM")
+            raise error_type("injected multi-table OOM")
         return original(model, items, device)
 
     monkeypatch.setattr(batched, "_execute", fail_large)
@@ -101,12 +102,24 @@ def test_oom_splits_without_losing_or_duplicating_outputs(setup, cache, monkeypa
         torch.testing.assert_close(actual[key], expected[key], atol=3e-5, rtol=3e-5)
 
 
-def test_tight_budget_uses_singleton_recovery(setup, monkeypatch):
+@pytest.mark.parametrize("cache", [False, True])
+@pytest.mark.parametrize("host_limited", [False, True])
+def test_tight_budget_uses_singleton_recovery(setup, cache, host_limited, monkeypatch):
     model, items, device = setup
+    if cache:
+        items = with_caches(model, items)
     expected = collect(model, items, device)
-    monkeypatch.setattr(batched, "execution_budget", lambda device: 1)
+    singleton = batched._singleton
+    if host_limited:
+        # A roomy GPU must not bypass a tight host budget. Execute recovery on
+        # CPU so this allocation guard can also be checked without CUDA hardware.
+        monkeypatch.setattr(batched, "_singleton", lambda m, i, d: singleton(m, i, device))
+    # 8 KiB fits these host packs but not the model workspace; the host-only
+    # case instead rejects packing even though the device has ample room.
+    budget = (lambda d: 1 if d.type == "cpu" else 2**60) if host_limited else (lambda d: 8192)
+    monkeypatch.setattr(batched, "execution_budget", budget)
     monkeypatch.setattr(batched, "_execute", lambda *args: pytest.fail("Fused pack exceeded budget"))
-    actual = collect(model, items, device)
+    actual = collect(model, items, torch.device("cuda") if host_limited else device)
     for key in expected:
         torch.testing.assert_close(actual[key], expected[key], atol=3e-5, rtol=3e-5)
 

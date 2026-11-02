@@ -3,6 +3,7 @@
 import math
 from collections.abc import Iterator
 from dataclasses import dataclass
+from itertools import groupby
 
 import numpy as np
 import torch
@@ -16,10 +17,6 @@ from .cached import predict_cached, query_memory
 from .direct import BatchPlanner, predict_direct
 from .memory import FP32_BYTES, empty_device_cache, execution_budget, is_out_of_memory
 from .runner import ModelCache, ModelRunner
-
-# Limit temporary host packs and avoid unbounded scheduling work for tiny tables.
-MAX_BATCH_ITEMS = 32
-MAX_PADDING_RATIO = 4.0
 
 
 @dataclass(frozen=True)
@@ -50,12 +47,6 @@ def _dimensions(items, group_size):
     return training, queries, groups * group_size
 
 
-def _padding_ratio(items, group_size):
-    training, queries, features = _dimensions(items, group_size)
-    actual = sum((t + q) * math.ceil(f / group_size) for t, q, f in (item.shape for item in items))
-    return len(items) * (training + queries) * (features // group_size) / actual
-
-
 def _estimate(model, items, device):
     """Include temporary packed caches; original caches already consume device memory."""
     c = model.config
@@ -76,6 +67,25 @@ def _estimate(model, items, device):
     # The head and regression sorting can materialize full output tensors.
     outputs = count * queries * c.outputs * FP32_BYTES * 3
     return workspace + packed + outputs
+
+
+def _fits_budget(model, items, device):
+    """Check host packing before allocation, separately from CUDA workspace."""
+    training, queries, features = _dimensions(items, model.config.group_size)
+    cached = items[0].cache is not None
+    rows, targets = (queries, 0) if cached else (training + queries, training)
+    inputs = len(items) * (rows * features + targets)
+    outputs = len(items) * queries * model.config.outputs
+    # Allow a per-member feature permutation copy alongside the padded packs.
+    scratch = max((q if cached else max(t, q)) * f for t, q, f in (item.shape for item in items))
+    host = (inputs + outputs + scratch) * FP32_BYTES
+    if host > execution_budget(torch.device("cpu")):
+        return False
+    required = _estimate(model, items, device)
+    if device.type != "cuda":
+        # CPU/MPS workspaces and host packs draw from the same physical memory.
+        required += host
+    return required <= execution_budget(device)
 
 
 def _pack_cache(items, groups, training):
@@ -162,11 +172,11 @@ def _run_group(model, items, device) -> Iterator[tuple[BatchItem, torch.Tensor]]
         yield from _singleton(model, items[0], device)
         return
     outputs = None
-    if _estimate(model, items, device) <= execution_budget(device):
+    if _fits_budget(model, items, device):
         try:
             outputs = _execute(model, items, device)
-        except RuntimeError as error:
-            if not is_out_of_memory(error, device):
+        except (MemoryError, RuntimeError) as error:
+            if not isinstance(error, MemoryError) and not is_out_of_memory(error, device):
                 raise
         if outputs is not None:
             yield from zip(items, outputs)
@@ -182,27 +192,10 @@ def _run_group(model, items, device) -> Iterator[tuple[BatchItem, torch.Tensor]]
 def batched_predictions(model: Model, items: list[BatchItem], device: torch.device):
     """Yield independently identified member outputs, fusing compatible workloads.
 
-    Execution order is deliberately independent of request order. Callers must
-    restore results by ``item.key``, including deterministic ensemble order.
+    Preserve input order and split only for cache compatibility or memory limits.
+    Callers restore fitted ensemble order by ``item.key`` when reducing outputs.
     Query tables must already be validated and contain at least one row.
     """
-    pending = sorted(items, key=lambda item: (
-        item.cache is not None,
-        (item.shape[0] + item.shape[1]) * math.ceil(item.shape[2] / model.config.group_size),
-        item.shape,
-    ))
-    group = []
     with torch.inference_mode():
-        for item in pending:
-            candidate = [*group, item]
-            if group and (
-                (group[0].cache is None) != (item.cache is None)
-                or len(candidate) > MAX_BATCH_ITEMS
-                or _padding_ratio(candidate, model.config.group_size) > MAX_PADDING_RATIO
-                or _estimate(model, candidate, device) > execution_budget(device)
-            ):
-                yield from _run_group(model, group, device)
-                group = []
-            group.append(item)
-        if group:
-            yield from _run_group(model, group, device)
+        for _, group in groupby(items, key=lambda item: item.cache is not None):
+            yield from _run_group(model, list(group), device)
