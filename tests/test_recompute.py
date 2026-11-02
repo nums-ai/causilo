@@ -5,8 +5,8 @@ import pytest
 import torch
 
 from causilo.data.dataset import PreparedDataset
-from causilo.execution import direct, memory, recompute
-from causilo.execution.direct import BatchPlanner, direct_predictions
+from causilo.execution import batched, direct, memory, recompute
+from causilo.execution.direct import BatchPlanner, predict_direct
 from causilo.execution.recompute import RecomputeRunner, RetryPlan
 from causilo.execution.runner import ModelRunner
 from causilo.model import Model, ModelConfig
@@ -120,10 +120,20 @@ def test_public_predictions_keep_all_ensemble_members_when_recomputed(task, devi
         fitted = cls(n_estimators=8, device=device).fit(table, np.arange(24) % 3)
         method = fitted.predict_proba if task == "classification" else fitted.predict
         expected = method(table[:5])
+        monkeypatch.setattr(batched, "execution_budget", lambda device: 1)
         monkeypatch.setattr(direct, "execution_budget", lambda device: 1)
+        original = RecomputeRunner.predict
+        calls = []
+
+        def observed(runner, *args):
+            calls.append(1)
+            return original(runner, *args)
+
+        monkeypatch.setattr(RecomputeRunner, "predict", observed)
         bound_tiles(monkeypatch, 7)
         actual = method(table[:5])
         np.testing.assert_allclose(actual, expected, atol=2e-4, rtol=2e-4)
+        assert len(calls) == 8
     finally:
         torch.set_num_threads(previous)
 
@@ -414,20 +424,14 @@ def test_retry_propagates_non_oom_errors_without_retrying():
     assert calls == [8] and retry.limit == 8 and retry.failures == 0
 
 
-@pytest.mark.parametrize("fit_members", [0, 1, 3, 8])
-def test_planner_selects_route_and_member_count_at_budget_boundary(small_model, fit_members):
+def test_planner_uses_full_query_when_it_fits(small_model):
     model, table, targets = small_model
     planner = BatchPlanner(model.config, targets.shape[1], table.shape[-1])
     device = torch.device("cpu")
     queries = table.shape[1] - targets.shape[1]
-    one_member = planner.estimate(1, queries, device)
-    budget = fit_members * one_member if fit_members else one_member - 1
-
-    plan = planner.choose(8, queries, budget, device)
-
-    assert plan.mode == ("direct" if fit_members else "recompute")
-    assert plan.members == max(1, fit_members)
-    assert plan.queries == queries
+    budget = planner.estimate(1, queries, device)
+    plan = planner.choose(queries, budget, device)
+    assert plan.mode == "direct" and plan.queries == queries
 
 
 @pytest.mark.parametrize(
@@ -447,9 +451,9 @@ def test_planner_compares_repeated_training_with_replay(small_model, training, f
     budget = planner.estimate(1, capacity, device)
     assert planner._recompute_state_bytes(queries) < budget
 
-    plan = planner.choose(8, queries, budget, device)
+    plan = planner.choose(queries, budget, device)
 
-    assert plan.mode == mode and plan.members == 1
+    assert plan.mode == mode
     assert plan.queries == (capacity if mode == "direct" else queries)
     if mode == "direct":
         assert planner.estimate(1, plan.queries, device) <= budget
@@ -464,9 +468,9 @@ def test_planner_keeps_query_batches_when_recompute_states_do_not_fit(small_mode
     budget = planner.estimate(1, capacity, device)
     assert planner._recompute_state_bytes(queries) > budget
 
-    plan = planner.choose(8, queries, budget, device)
+    plan = planner.choose(queries, budget, device)
 
-    assert plan.mode == "direct" and plan.members == 1 and plan.queries == capacity
+    assert plan.mode == "direct" and plan.queries == capacity
 
 
 def test_planner_recomputes_when_minimum_direct_query_does_not_fit(small_model):
@@ -476,9 +480,9 @@ def test_planner_recomputes_when_minimum_direct_query_does_not_fit(small_model):
     queries = 1000
     budget = planner.estimate(1, 1, device) - 1
 
-    plan = planner.choose(8, queries, budget, device)
+    plan = planner.choose(queries, budget, device)
 
-    assert plan.mode == "recompute" and plan.members == 1 and plan.queries == queries
+    assert plan.mode == "recompute" and plan.queries == queries
 
 
 def test_planner_prefers_query_batching_on_equal_estimated_work(small_model, monkeypatch):
@@ -488,18 +492,18 @@ def test_planner_prefers_query_batching_on_equal_estimated_work(small_model, mon
     budget = planner.estimate(1, 500, device)
     monkeypatch.setattr(BatchPlanner, "_training_work", lambda self: (100, 100))
 
-    plan = planner.choose(8, 1000, budget, device)
+    plan = planner.choose(1000, budget, device)
 
     assert plan.mode == "direct" and plan.queries == 500
 
 
-def test_direct_oom_replans_remaining_members_into_recompute(small_model, monkeypatch):
+def test_direct_oom_replans_member_into_recompute(small_model, monkeypatch):
     model, table, targets = small_model
     device = torch.device("cpu")
     count = targets.shape[1]
     fitted = PreparedDataset.prepare(
         table[0, :count].numpy(), targets[0].numpy(), task=model.config.task,
-        n_estimators=3, retain_preprocessing=True, random_state=42,
+        n_estimators=1, retain_preprocessing=True, random_state=42,
         class_permutation_size=model.config.outputs,
     )
     query = fitted.encoder.transform(table[0, count:].numpy())
@@ -507,31 +511,27 @@ def test_direct_oom_replans_remaining_members_into_recompute(small_model, monkey
     planner = BatchPlanner(model.config, count, fitted.features.shape[1])
     budget = planner.estimate(1, len(query), device)
     monkeypatch.setattr(direct, "execution_budget", lambda _: budget)
+    member = fitted.members[0]
     with torch.inference_mode():
-        expected = list(direct_predictions(model, fitted, transformed, device, lambda value: value))
-    original_predict = ModelRunner.predict
+        expected = predict_direct(model, fitted, transformed, member, device, lambda value: value)
     original_choose = BatchPlanner.choose
     direct_calls = []
     modes = []
 
-    def fail_second_member(runner, *args):
+    def fail_direct(runner, *args):
         direct_calls.append(True)
-        if len(direct_calls) == 2:
-            raise torch.cuda.OutOfMemoryError("failure after an already completed member")
-        return original_predict(runner, *args)
+        raise torch.cuda.OutOfMemoryError("injected direct failure")
 
     def record_plan(planner, *args):
         plan = original_choose(planner, *args)
         modes.append(plan.mode)
         return plan
 
-    monkeypatch.setattr(ModelRunner, "predict", fail_second_member)
+    monkeypatch.setattr(ModelRunner, "predict", fail_direct)
     monkeypatch.setattr(BatchPlanner, "choose", record_plan)
     with torch.inference_mode():
-        actual = list(direct_predictions(model, fitted, transformed, device, lambda value: value))
+        actual = predict_direct(model, fitted, transformed, member, device, lambda value: value)
 
-    assert modes == ["direct", "direct", "recompute"]
-    assert len(direct_calls) == 2
-    assert [member for member, _ in actual] == [member for member, _ in expected]
-    for (_, result), (_, reference) in zip(actual, expected):
-        torch.testing.assert_close(result, reference, atol=2e-5, rtol=2e-5)
+    assert modes == ["direct", "recompute"]
+    assert len(direct_calls) == 1
+    torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)

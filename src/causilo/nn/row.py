@@ -21,10 +21,13 @@ class LatentUpdate(nn.Module):
         self.output_norm = nn.RMSNorm(width, eps=1e-5)
         self.feedforward = FeedForward(width, expansion)
 
-    def forward(self, latents: Tensor, features: Tensor) -> Tensor:
+    def forward(
+        self, latents: Tensor, features: Tensor, *, group_lengths: Tensor | None = None
+    ) -> Tensor:
         """Return updated (*batch, row_latents, width) latent tokens."""
         context = self.context_norm(torch.cat((latents, features), dim=-2))
-        latents = latents + self.read(context[..., : latents.shape[-2], :], context)
+        lengths = None if group_lengths is None else group_lengths + latents.shape[-2]
+        latents = latents + self.read(context[..., : latents.shape[-2], :], context, key_lengths=lengths)
         return latents + self.feedforward(self.output_norm(latents))
 
 
@@ -48,11 +51,13 @@ class RowLayer(nn.Module):
         self.features = FeatureUpdate(width, heads)
         self.update_latents = LatentUpdate(width, heads, expansion)
 
-    def forward(self, latents: Tensor, features: Tensor) -> tuple[Tensor, Tensor]:
+    def forward(
+        self, latents: Tensor, features: Tensor, *, group_lengths: Tensor | None = None
+    ) -> tuple[Tensor, Tensor]:
         count = latents.shape[-2]
         combined = self.features(torch.cat((latents, features), dim=-2), latents)
         latents, features = combined[..., :count, :], combined[..., count:, :]
-        return self.update_latents(latents, features), features
+        return self.update_latents(latents, features, group_lengths=group_lengths), features
 
 
 class RowBlock(nn.Module):
@@ -69,18 +74,20 @@ class RowBlock(nn.Module):
         """Number of intermediate latent states needed to replay feature updates."""
         return len(self.rounds)
 
-    def _refine(self, features: Tensor, trace: list[Tensor] | None = None) -> tuple[Tensor, Tensor]:
+    def _refine(
+        self, features: Tensor, trace: list[Tensor] | None = None, *, group_lengths: Tensor | None = None
+    ) -> tuple[Tensor, Tensor]:
         """Advance the shared feature/latent recurrence, optionally recording latents."""
         latents = self.latents.to(features).expand(*features.shape[:-2], *self.latents.shape)
         for refinement in self.rounds:
-            latents, features = refinement(latents, features)
+            latents, features = refinement(latents, features, group_lengths=group_lengths)
             if trace is not None:
                 trace.append(latents)
         return latents, features
 
-    def forward(self, features: Tensor) -> Tensor:
+    def forward(self, features: Tensor, *, group_lengths: Tensor | None = None) -> Tensor:
         """Return features with the same (*batch, feature_groups, width) layout."""
-        latents, features = self._refine(features)
+        latents, features = self._refine(features, group_lengths=group_lengths)
         return self.finish(features, latents)
 
     def capture_latents(self, features: Tensor) -> Tensor:
@@ -124,9 +131,9 @@ class RowPool(nn.Module):
         self.rounds = nn.ModuleList(LatentUpdate(width, heads, expansion) for _ in range(depth))
         self.output_norm = nn.RMSNorm(width, eps=1e-5)
 
-    def forward(self, features: Tensor) -> Tensor:
+    def forward(self, features: Tensor, *, group_lengths: Tensor | None = None) -> Tensor:
         """Map (*batch, feature_groups, width) to (*batch, row_latents * width)."""
         latents = self.latents.to(features).expand(*features.shape[:-2], *self.latents.shape)
         for update in self.rounds:
-            latents = update(latents, features)
+            latents = update(latents, features, group_lengths=group_lengths)
         return self.output_norm(latents).flatten(-2)

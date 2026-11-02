@@ -164,6 +164,7 @@ def test_invalid_device_refit_discards_previous_context(estimator_type):
 
 @pytest.mark.parametrize("estimator_type", [CausiloClassifier, CausiloRegressor])
 def test_ensemble_and_query_partition_preserve_predictions(estimator_type, monkeypatch):
+    from causilo.execution import batched
     from causilo.execution.direct import BatchPlan, BatchPlanner
 
     rng = np.random.default_rng(63)
@@ -172,8 +173,18 @@ def test_ensemble_and_query_partition_preserve_predictions(estimator_type, monke
     model = estimator_type(n_estimators=4, device="cpu").fit(table, target)
     predict = model.predict_proba if estimator_type is CausiloClassifier else model.predict
     expected = predict(table[:7])
-    monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(1, 2))
+    monkeypatch.setattr(batched, "execution_budget", lambda device: 1)
+    monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(2))
+    original = ModelRunner.predict
+    chunks = []
+
+    def observed(runner, features, targets):
+        chunks.append(features.shape[1] - targets.shape[1])
+        return original(runner, features, targets)
+
+    monkeypatch.setattr(ModelRunner, "predict", observed)
     np.testing.assert_allclose(predict(table[:7]), expected, atol=2e-4, rtol=2e-4)
+    assert max(chunks) <= 2 and sum(chunks) == 4 * 7
 
 
 def test_prediction_oom_reselects_ensemble_and_preserves_result(monkeypatch):

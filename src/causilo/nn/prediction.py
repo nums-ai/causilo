@@ -17,14 +17,16 @@ class PredictionBlock(nn.Module):
             AttentionLayer(width, heads, expansion, normalize_heads=True) for _ in range(depth)
         )
 
-    def forward(self, rows: Tensor, *, context_rows: int) -> Tensor:
+    def forward(
+        self, rows: Tensor, *, context_rows: int, key_lengths: Tensor | None = None
+    ) -> Tensor:
         """Map (*batch, training + queries, width) to (*batch, queries, width)."""
         for index, layer in enumerate(self.layers):
             keys = layer.prepare(rows[..., :context_rows, :])
             # Earlier layers must advance training rows to prepare the next K/V;
             # the final layer needs only query outputs.
             queries = rows[..., context_rows:, :] if index == len(self.layers) - 1 else rows
-            rows = layer.query(queries, keys)
+            rows = layer.query(queries, keys, key_lengths=key_lengths)
         return rows
 
     def build_context(self, training: Tensor) -> BlockCache:
@@ -37,12 +39,12 @@ class PredictionBlock(nn.Module):
                 training = layer.query(training, keys)
         return BlockCache(tuple(cache))
 
-    def query(self, rows: Tensor, state: BlockCache) -> Tensor:
+    def query(self, rows: Tensor, state: BlockCache, *, key_lengths: Tensor | None = None) -> Tensor:
         """Run query rows through saved contexts without updating the training state."""
         if len(state.layers) != len(self.layers):
             raise ValueError("Prediction cache depth does not match the model")
         for layer, keys in zip(self.layers, state.layers):
-            rows = layer.query(rows, keys)
+            rows = layer.query(rows, keys, key_lengths=key_lengths)
         return rows
 
 

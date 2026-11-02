@@ -58,7 +58,7 @@ class Attention(nn.Module):
         packed = F.linear(rows, self.projection.weight[self.width :], self.projection.bias[self.width :])
         return self._keys(*packed.chunk(2, dim=-1))
 
-    def attend(self, query: Tensor, context: KVPair) -> Tensor:
+    def attend(self, query: Tensor, context: KVPair, *, key_lengths: Tensor | None = None) -> Tensor:
         """Attend with projected tensors and return (*batch, queries, width)."""
         if query.shape[-2] == 0:
             return query.new_empty((*query.shape[:-3], 0, self.width))
@@ -68,13 +68,19 @@ class Attention(nn.Module):
         query = query.reshape(-1, *query.shape[-3:])
         key = context.key.reshape(-1, *context.key.shape[-3:])
         value = context.value.reshape(-1, *context.value.shape[-3:])
-        scaled = self.scaling(query, key.shape[-2]) if self.scaling is not None else query
-        result = F.scaled_dot_product_attention(scaled, key, value)
+        mask = None
+        count = key.shape[-2]
+        if key_lengths is not None:
+            count = key_lengths.expand(leading).reshape(-1)
+            mask = torch.arange(key.shape[-2], device=key.device)[None, :] < count[:, None]
+            mask = mask[:, None, None, :]
+        scaled = self.scaling(query, count) if self.scaling is not None else query
+        result = F.scaled_dot_product_attention(scaled, key, value, attn_mask=mask)
         merged = result.transpose(-3, -2).flatten(-2).reshape(*leading, query.shape[-2], self.width)
         return self.output(merged)
 
-    def forward(self, query: Tensor, context: Tensor) -> Tensor:
-        return self.attend(self.prepare_query(query), self.prepare_context(context))
+    def forward(self, query: Tensor, context: Tensor, *, key_lengths: Tensor | None = None) -> Tensor:
+        return self.attend(self.prepare_query(query), self.prepare_context(context), key_lengths=key_lengths)
 
 
 class AttentionLayer(nn.Module):
@@ -93,16 +99,16 @@ class AttentionLayer(nn.Module):
         combined = rows + update
         return combined + self.feedforward(self.feedforward_norm(combined))
 
-    def forward(self, rows: Tensor, context: Tensor) -> Tensor:
+    def forward(self, rows: Tensor, context: Tensor, *, key_lengths: Tensor | None = None) -> Tensor:
         normalized = self.attention_norm(rows)
         keys = self.attention_norm(context)
-        return self._finish(rows, self.attention(normalized, keys))
+        return self._finish(rows, self.attention(normalized, keys, key_lengths=key_lengths))
 
     def prepare(self, context: Tensor) -> KVPair:
         """Normalize and project the context exactly as in direct forward execution."""
         return self.attention.prepare_context(self.attention_norm(context))
 
-    def query(self, rows: Tensor, context: KVPair) -> Tensor:
+    def query(self, rows: Tensor, context: KVPair, *, key_lengths: Tensor | None = None) -> Tensor:
         """Apply the full residual layer using already prepared context K/V."""
         projected = self.attention.prepare_query(self.attention_norm(rows))
-        return self._finish(rows, self.attention.attend(projected, context))
+        return self._finish(rows, self.attention.attend(projected, context, key_lengths=key_lengths))

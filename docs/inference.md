@@ -32,31 +32,62 @@ restored to target units and averaged across members; they are not unprocessed
 model-head tensors. The `quantiles` argument is only accepted with
 `output_type="quantiles"`.
 
+## Independent table batches
+
+Use `fit_batched` with nonempty string IDs to share model weights across
+independent tables. Row counts, feature schemas, and class sets can differ.
+
+```python
+regressor.fit_batched({
+    "sales": (X_train_sales, y_train_sales),
+    "price": (X_train_price, y_train_price),
+})
+predictions = regressor.predict_batched({
+    "sales": X_test_sales,  # mean output
+    "price": {"X": X_test_price, "output_type": "quantiles", "quantiles": [0.1, 0.5, 0.9]},
+})
+```
+
+Regression output options follow [Regression outputs](#regression-outputs)
+and can differ by table; passing `X` alone returns mean predictions.
+
+For classification, use `predict_batched({id: X})` for labels or
+`predict_proba_batched({id: X})` for probabilities. Probability columns follow
+`classes_batched_[id]`.
+
+Query any subset of fitted IDs; results preserve query ID order. Each query
+must match its fitted schema and contain at least one row. An empty mapping
+returns `{}`.
+
+Constructor options apply to all tables. Both `fit` and `fit_batched` replace
+the previous fit; a failed refit leaves the estimator unfitted. Use the
+prediction methods matching the fitted mode.
+
+See the runnable [batch example](../examples/batched_prediction.py).
+
 ## Precision and reproducibility
 
 CUDA uses FP16 mixed precision, with regression column stages and both output heads in FP32. CPU and MPS execution use FP32. Regression target scaling and output restoration use float64 on the CPU.
 
 The same inputs and seed reproduce the fitted feature and class permutations without changing global RNG state. Floating-point results can vary with execution device and batch shape; bitwise determinism is not enforced.
 
-## Large inputs without a fitted K/V cache
+## Memory use
 
-Causilo first reduces concurrent ensemble members while keeping all query rows.
-If one member still exceeds the memory budget, it chooses query batching or
-column-summary recomputation based on estimated computation cost. All training
-rows and ensemble members are preserved.
+Causilo automatically reduces execution batches or splits query rows when
+memory is tight, preserving all training rows and ensemble members. Without a
+fitted K/V cache, it can also recompute intermediate values to reduce memory use.
+Large contexts can still exceed device memory.
 
-Recomputation processes feature groups and rows in tiles, keeping compact
-summaries and row states on the execution device instead of a full hidden
-feature grid. Prediction uses the full training context and retains temporary
-K/V for one layer at a time.
-
-Tile sizes adapt to available memory, and OOM retries shrink failed tiles.
-Retained states and a layer's full training K/V must still fit on the device;
-intermediate CPU offloading is not supported.
+`use_kv_cache=True` speeds up repeated prediction by retaining a cache for each
+table and ensemble member, at the cost of additional device memory.
 
 ## Restoring a fitted estimator
 
 With `device="auto"`, restoration selects an available device again. An explicitly configured device must be available. Saved state includes fitted preprocessing and optional attention caches, while weights are loaded from the checkpoint used during fit. Use matching Causilo and dependency versions, including the Python major/minor version.
+
+Pickle/joblib also preserve every ID and fitted context from `fit_batched`,
+without storing model weights. Saved K/V caches are restored without rebuilding
+them, for both single-table and batched fits.
 
 ## Local checkpoints
 

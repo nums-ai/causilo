@@ -12,9 +12,8 @@ from . import checkpoints
 from .data.dataset import PreparedDataset
 from .data.ensemble import EnsembleMember
 from .ecoc import ECOCCodec
-from .execution.cached import cached_predictions
-from .execution.direct import direct_predictions
 from .execution.runner import ModelCache, ModelRunner
+from .prediction import predict_contexts
 
 
 def resolve_device(request: str) -> torch.device:
@@ -78,6 +77,7 @@ class Engine:
         self.device = resolve_device(device)
         self.model = None
         self.state: FitState | None = None
+        self.batch_states: dict[str, FitState] | None = None
 
     def fit(
         self,
@@ -91,6 +91,23 @@ class Engine:
     ) -> None:
         """Prepare context without optimizing weights; a failed fit stays unfitted."""
         self.state = None
+        self.batch_states = None
+        self.state = self.prepare_state(
+            table, targets, n_estimators=n_estimators, use_kv_cache=use_kv_cache,
+            retain_preprocessing=retain_preprocessing, random_state=random_state,
+        )
+
+    def prepare_state(
+        self,
+        table,
+        targets,
+        *,
+        n_estimators: int,
+        use_kv_cache: bool,
+        retain_preprocessing: bool,
+        random_state: int,
+    ) -> FitState:
+        """Build a complete context without publishing or replacing fitted state."""
         if isinstance(n_estimators, bool) or not isinstance(n_estimators, Integral) or n_estimators < 1:
             raise ValueError("n_estimators must be a positive integer")
         if isinstance(random_state, bool) or not isinstance(random_state, Integral) or random_state < 0:
@@ -134,8 +151,7 @@ class Engine:
                     caches = self._build_caches(runner, prepared)
                 else:
                     code_caches = tuple(self._build_caches(runner, dataset) for dataset in code_datasets)
-        # Publish only a complete context; partially built caches stay local.
-        self.state = FitState(
+        return FitState(
             dataset=prepared,
             caches=caches,
             codec=codec,
@@ -160,78 +176,18 @@ class Engine:
 
     def require_state(self) -> FitState:
         """Expose fitted state only after all preparation has succeeded."""
+        if self.batch_states is not None:
+            raise ValueError("This estimator was fitted with fit_batched; use a batched prediction method")
         if self.state is None:
             raise NotFittedError("Call fit successfully before prediction")
         return self.state
 
-    def _member_predictions(self, transformed, state, reduce_output, *, fitted=None, caches=None):
-        """Select direct or cached execution using already transformed queries."""
-        fitted = state.dataset if fitted is None else fitted
-        caches = state.caches if caches is None else caches
-        if caches is None:
-            return direct_predictions(self.model, fitted, transformed, self.device, reduce_output)
-        return cached_predictions(
-            self.model, fitted, transformed, state.cached_members(caches, fitted), self.device, reduce_output
-        )
-
-    def _classification_probabilities(self, transformed, state, *, fitted=None, caches=None) -> np.ndarray:
-        logits = []
-        for member, result in self._member_predictions(
-            transformed, state, lambda value: value, fitted=fitted, caches=caches
-        ):
-            logits.append(result[:, member.class_order].numpy())
-        combined = np.mean(logits, axis=0)
-        probabilities = np.exp(combined - combined.max(axis=-1, keepdims=True))
-        return probabilities / probabilities.sum(axis=-1, keepdims=True)
-
-    def predict(self, table) -> np.ndarray:
-        """Return class probabilities or regression point predictions."""
+    def predict(self, table, *, output_type="mean", levels=None) -> np.ndarray:
+        """Run a single fitted context through the shared prediction pipeline."""
         state = self.require_state()
         transformed = state.dataset.query_tables(table)
-        if self.task == "classification" and state.codec is not None:
-            with torch.inference_mode():
-
-                def row_probabilities():
-                    for index, fitted in enumerate(state.code_datasets):
-                        caches = None if state.code_caches is None else state.code_caches[index]
-                        yield self._classification_probabilities(
-                            transformed, state, fitted=fitted, caches=caches
-                        )
-
-                return state.codec.decode_rows(row_probabilities())
-        if self.task == "classification":
-            with torch.inference_mode():
-                return self._classification_probabilities(transformed, state)
-        outputs = []
-
-        def reduce_output(result):
-            # Sorting fixes the floating-point summation order for regression.
-            return result.sort(dim=-1).values.mean(dim=-1)
-
-        with torch.inference_mode():
-            for _, result in self._member_predictions(transformed, state, reduce_output):
-                point = result.numpy().astype(np.float64)
-                outputs.append(state.dataset.target_encoder.inverse_transform(point[:, None])[:, 0])
-        combined = np.mean(outputs, axis=0)
-        return combined
-
-    def predict_raw(self, table) -> np.ndarray:
-        """Sort each member, restore target units, then average matching quantiles."""
-        state = self.require_state()
-        if self.task != "regression":
-            raise ValueError("Quantile prediction requires a regression model")
-        transformed = state.dataset.query_tables(table)
-        outputs = []
-
-        def reduce_output(result):
-            return result.sort(dim=-1).values
-
-        with torch.inference_mode():
-            for _, result in self._member_predictions(transformed, state, reduce_output):
-                values = result.numpy().astype(np.float64)
-                outputs.append(
-                    state.dataset.target_encoder.inverse_transform(values.reshape(-1, 1)).reshape(
-                        values.shape
-                    )
-                )
-        return np.mean(outputs, axis=0)
+        if not len(next(iter(transformed.values()))):
+            raise ValueError("Query table must contain at least one row")
+        return predict_contexts(
+            self.model, {0: state}, {0: transformed}, {0: (output_type, levels)}, self.device
+        )[0]

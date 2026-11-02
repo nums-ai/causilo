@@ -15,6 +15,14 @@ from .execution.precision import stage_dtype
 from .model import ModelConfig
 
 STATE_SCHEMA = "causilo-fitted-1"
+BATCH_STATE_SCHEMA = "causilo-batched-fitted-1"
+
+
+def compact_state(state):
+    if state is not None and state.codec is not None:
+        # Reconstruct target-only ECOC views after loading, avoiding joblib copies.
+        return replace(state, code_datasets=None)
+    return state
 
 
 def runtime_versions() -> dict[str, str]:
@@ -97,13 +105,14 @@ def export_estimator(estimator) -> dict:
 
     engine = getattr(estimator, "_engine", None)
     state = engine.state if engine is not None else None
-    if state is not None and state.codec is not None:
-        # Code contexts share preprocessing and only differ in encoded targets.
-        # Joblib duplicates aliased NumPy arrays, so persist the common dataset once.
-        state = replace(state, code_datasets=None)
+    batched = engine is not None and engine.batch_states is not None
+    state = (
+        {key: compact_state(value) for key, value in engine.batch_states.items()}
+        if batched else compact_state(state)
+    )
     return {
         "version": __version__,
-        "schema": STATE_SCHEMA,
+        "schema": BATCH_STATE_SCHEMA if batched else STATE_SCHEMA,
         "dependencies": runtime_versions(),
         "revision": checkpoints.RELEASE_COMMIT,
         "checkpoint": engine.checkpoint.copy() if state is not None and engine.checkpoint else None,
@@ -120,12 +129,16 @@ def import_estimator(estimator, saved: dict) -> None:
     """Restore parameters and fitted context, loading weights but never rebuilding K/V."""
     from . import __version__
 
-    if saved["version"] != __version__ or saved["schema"] != STATE_SCHEMA:
+    if saved["version"] != __version__ or saved["schema"] not in {STATE_SCHEMA, BATCH_STATE_SCHEMA}:
         raise ValueError("Restore requires the same Causilo version and fitted-state schema")
     if saved.get("dependencies") != runtime_versions():
         raise ValueError("Restore requires matching Python and dependency versions")
     if saved["revision"] != checkpoints.RELEASE_COMMIT:
         raise ValueError("Saved state belongs to a different pretrained checkpoint")
+    from .estimators import invalidate_fit, publish_fitted_attributes
+
+    invalidate_fit(estimator)
+    estimator.__dict__.pop("_engine", None)
     estimator.__dict__.update({"checkpoint_path": None, **saved["parameters"]})
     if saved["fitted"] is None:
         return
@@ -144,7 +157,22 @@ def import_estimator(estimator, saved: dict) -> None:
     engine.model = model.to(engine.device)
     if engine.model.config.record() != saved["model_config"]:
         raise ValueError("Saved cache does not match the model shape")
-    state = saved["fitted"]
+    if saved["schema"] == BATCH_STATE_SCHEMA:
+        states = saved["fitted"]
+        if not isinstance(states, dict) or not states or any(
+            not isinstance(key, str) or not key or not isinstance(state, FitState)
+            for key, state in states.items()
+        ):
+            raise ValueError("Saved batch must contain string IDs and fitted contexts")
+        engine.batch_states = {key: restore_state(state, engine) for key, state in states.items()}
+    else:
+        engine.state = restore_state(saved["fitted"], engine)
+    estimator._engine = engine
+    publish_fitted_attributes(estimator)
+
+
+def restore_state(state: FitState, engine: Engine) -> FitState:
+    """Validate and move a fitted context without rebuilding preprocessing or K/V."""
     if state.codec is not None and state.code_datasets is None:
         # Reuse the saved codebook and transforms; neither fitting nor K/V rebuilds
         # are needed to restore each row's targets and shared preprocessing.
@@ -180,14 +208,4 @@ def import_estimator(estimator, saved: dict) -> None:
             if state.code_caches is None
             else tuple(move(caches) for caches in state.code_caches),
         )
-    engine.state = state
-    estimator._engine = engine
-    table = engine.state.dataset
-    estimator.n_features_in_ = table.encoder.width
-    if table.encoder.names is not None:
-        import numpy as np
-
-        if all(isinstance(name, str) for name in table.encoder.names):
-            estimator.feature_names_in_ = np.asarray(table.encoder.names, dtype=object)
-    if engine.task == "classification":
-        estimator.classes_ = table.target_encoder.classes_
+    return state

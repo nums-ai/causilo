@@ -227,8 +227,11 @@ def available_bytes(device: torch.device) -> int:
 
 def is_out_of_memory(error: RuntimeError, device: torch.device) -> bool:
     """Recognize allocator failures without retrying unrelated runtime errors."""
-    return isinstance(error, torch.cuda.OutOfMemoryError) or (
-        device.type == "mps" and str(error).startswith("MPS backend out of memory")
+    # Host allocation can fail during CPU execution or a device-to-host copy.
+    return (
+        isinstance(error, torch.cuda.OutOfMemoryError)
+        or "DefaultCPUAllocator: can't allocate memory" in str(error)
+        or (device.type == "mps" and str(error).startswith("MPS backend out of memory"))
     )
 
 

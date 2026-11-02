@@ -105,6 +105,23 @@ Refit after changing options. Use `device="cuda:0"` to select a specific GPU, or
 
 Ensembles cycle through none, rank2gaussian, robust and power normalization. See [inference details](docs/inference.md) for quantile prediction, precision, reproducibility, and [local checkpoints](docs/inference.md#local-checkpoints).
 
+## Independent table batches
+
+Fit independent tables with string IDs, sharing model weights. Tables may have
+different row counts, feature counts, and classes.
+
+```python
+regressor.fit_batched({
+    "sales": (X_train_sales, y_train_sales),
+    "price": (X_train_price, y_train_price),
+})
+predictions = regressor.predict_batched({"sales": X_test_sales, "price": X_test_price})
+```
+
+Classifiers also provide `predict_batched` and `predict_proba_batched`. See
+[batch inference](docs/inference.md#independent-table-batches) for ID matching,
+per-table output options, and fitted-state behavior.
+
 ## Repeated prediction
 
 Set `use_kv_cache=True` to move reusable context computation into fit, trading additional device memory for repeated prediction speed. With `retain_preprocessing=False`, fitted transforms are retained but transformed training tables are recomputed. See [cached prediction](examples/cached_prediction.py).
