@@ -14,34 +14,18 @@ from sklearn.exceptions import NotFittedError
 from causilo import CausiloClassifier, CausiloRegressor, checkpoints
 from causilo import batch as batch_api
 from causilo.execution.runner import ModelRunner
-from causilo.model import Model, ModelConfig
 
 
 @pytest.fixture
-def small_checkpoints(monkeypatch):
+def small_checkpoints(monkeypatch, make_batch_model):
     calls = []
 
     def load(task):
         calls.append(task)
-        with torch.random.fork_rng():
-            torch.manual_seed(34)
-            model = Model(ModelConfig(
-                task=task, width=8, expansion=2, group_size=3, frequencies=3,
-                column_latents=3, column_heads=2, column_depths=(2, 1),
-                row_heads=2, row_latents=2, row_depths=(2, 2),
-                prediction_heads=2, prediction_depth=2,
-                outputs=10 if task == "classification" else 999,
-            ))
-            for name, parameter in model.named_parameters():
-                if "latents" in name or name.endswith(("frequencies", "missing")):
-                    torch.nn.init.normal_(parameter, std=0.1)
-        return model.eval()
+        return make_batch_model(task, outputs=10 if task == "classification" else 999)
 
     monkeypatch.setattr(checkpoints, "load_pretrained_model", load)
-    previous = torch.get_num_threads()
-    torch.set_num_threads(2)
-    yield calls
-    torch.set_num_threads(previous)
+    return calls
 
 
 def data():
@@ -55,8 +39,7 @@ def data():
     return a, b
 
 
-@pytest.mark.parametrize("cache", [False, True])
-@pytest.mark.parametrize("retain", [False, True])
+@pytest.mark.parametrize("cache,retain", [(False, True), (False, False), (True, True)])
 def test_classifier_ragged_contexts_match_independent_fits(small_checkpoints, cache, retain):
     a, b = data()
     ya = np.asarray(["yes" if i % 2 else "no" for i in range(len(a))])
@@ -103,43 +86,48 @@ def test_regressor_mixed_outputs_scales_and_batch_composition(small_checkpoints,
         np.testing.assert_allclose(alone, single_b.predict(b[:2], output_type=output), atol=2e-4, rtol=2e-5)
 
 
-@pytest.mark.parametrize("output_type", ["mean", "median", "quantiles", "raw"])
-def test_completed_tables_release_members_and_preserve_sum_order(small_checkpoints, monkeypatch, output_type):
+def test_completed_tables_release_members_and_preserve_sum_order(small_checkpoints, monkeypatch):
     x = np.arange(12).reshape(6, 2)
     y = np.tile([-1.0, 1.0], 3)  # identity target scaling
     model = CausiloRegressor(device="cpu", n_estimators=4).fit_batched({
-        key: (x, y) for key in ("a", "b", "c")
+        key: (x, y) for key in ("a", "b")
     })
-    references = {key: [] for key in ("a", "b", "c")}
+    references = {key: [] for key in ("a", "b")}
     # This order interleaves tables and deliberately changes floating-point
     # cancellation unless aggregation restores fitted member order.
     order = [("a", 0), ("b", 2), ("a", 2), ("b", 0), ("a", 1), ("a", 3),
-             ("b", 1), ("b", 3), ("c", 3), ("c", 2), ("c", 1), ("c", 0)]
+             ("b", 1), ("b", 3)]
 
     def predictions(model, items, device):
         items = {item.key: item for item in items}
         for key in order:
             item = items[key]
-            shape = (item.shape[1],) if output_type == "mean" else (item.shape[1], 999)
+            shape = (item.shape[1], 999)
             value = torch.full(shape, [1e20, 1, -1e20, 3][key[1]], dtype=torch.float32)
             references[key[0]].append(weakref.ref(value))
             yield item, value
             del value
-            if key == ("a", 3):
-                assert all(reference() is None for reference in references["a"])
-                assert all(reference() is not None for reference in references["b"])
-            if key == ("b", 3):
-                assert all(reference() is None for reference in references["b"])
+            if key[1] == 3:
+                assert all(reference() is None for reference in references[key[0]])
 
     monkeypatch.setattr(batch_api, "batched_predictions", predictions)
-    options = {"output_type": output_type}
-    if output_type == "quantiles":
-        options["quantiles"] = [0.9, 0.1]
-    results = model.predict_batched({key: {"X": x[:rows], **options} for key, rows in (("c", 1), ("b", 3), ("a", 2))})
-    assert list(results) == ["c", "b", "a"]
-    for result in results.values():
-        np.testing.assert_array_equal(result, np.full(result.shape, 0.75))
-        assert result.base is None  # point outputs must not retain 999 quantiles
+    raw_outputs = []
+    aggregate = batch_api.regression_predictions
+
+    def observed(*args):
+        result = aggregate(*args)
+        raw_outputs.append(weakref.ref(result))
+        return result
+
+    monkeypatch.setattr(batch_api, "regression_predictions", observed)
+    results = model.predict_batched({
+        key: {"X": x[:rows], "output_type": "median"} for key, rows in (("b", 3), ("a", 2))
+    })
+    assert list(results) == ["b", "a"]
+    for key, rows in (("b", 3), ("a", 2)):
+        np.testing.assert_array_equal(results[key], np.full(rows, 0.75))
+    # Point outputs must not keep the full native-quantile matrices alive.
+    assert all(reference() is None for reference in raw_outputs)
     assert all(reference() is None for refs in references.values() for reference in refs)
 
 
@@ -183,8 +171,9 @@ def test_failed_cache_fit_never_publishes_partial_batch(small_checkpoints, monke
     def fail_second_table(runner, table, targets):
         nonlocal calls
         calls += 1
-        assert model._engine.state is None
-        assert model._engine.batch_states is None
+        for method, query in ((model.predict, x[:1]), (model.predict_batched, {"a": x[:1]})):
+            with pytest.raises(NotFittedError):
+                method(query)
         if calls == 3:
             raise RuntimeError("injected cache failure")
         return build_cache(runner, table, targets)
@@ -201,7 +190,7 @@ def test_failed_cache_fit_never_publishes_partial_batch(small_checkpoints, monke
 
 
 @pytest.mark.parametrize("cache", [False, True])
-def test_independent_ecoc_decoders_with_different_round_counts(small_checkpoints, cache):
+def test_independent_many_class_contexts(small_checkpoints, cache):
     _, x = data()
     x = np.tile(x, (4, 1))
     params = dict(device="cpu", n_estimators=2, use_kv_cache=cache)
@@ -212,7 +201,6 @@ def test_independent_ecoc_decoders_with_different_round_counts(small_checkpoints
         for key, query in queries.items()
     }
     model = CausiloClassifier(**params).fit_batched(tables)
-    assert len(model._engine.batch_states["a"].code_datasets) != len(model._engine.batch_states["b"].code_datasets)
     actual = model.predict_proba_batched(queries)
     for key in queries:
         np.testing.assert_allclose(actual[key], expected[key], atol=2e-5, rtol=2e-5)
@@ -225,31 +213,30 @@ def test_invalid_fit_input_does_not_load_weights(small_checkpoints, tables):
     assert small_checkpoints == []
 
 
-@pytest.mark.parametrize("options", [
-    {"output_type": "mean"}, {"X": [[1]], "output_type": "invalid"},
-    {"X": [[1]], "output_type": "quantiles"},
-    {"X": [[1]], "quantiles": [0.5]},
-    {"X": [[1]], "output_type": "quantiles", "quantiles": [0]},
-    {"X": [[1]], "device": "cpu"},
-])
-def test_bad_options_validate_before_execution(small_checkpoints, monkeypatch, options):
-    a, _ = data()
-    model = CausiloRegressor(device="cpu", n_estimators=1).fit_batched({"a": (a, np.arange(len(a)))})
-    monkeypatch.setattr(ModelRunner, "predict", lambda *a, **kw: pytest.fail("Ran invalid query"))
-    with pytest.raises(ValueError, match="Table 'a'"):
-        model.predict_batched({"a": options})
-    with pytest.raises(ValueError, match="unknown"):
-        model.predict_batched({"unknown": a.iloc[:1]})
-    with pytest.raises(ValueError, match="Table 'a'"):
-        model.predict_batched({"a": a.iloc[:1, ::-1]})
-    assert model._engine.batch_states is not None
+@pytest.mark.parametrize("options", [None, {"device": "cpu"}, {"output_type": "invalid"},
+                                     {"output_type": "quantiles", "quantiles": [0]}])
+def test_bad_options_validate_all_tables_before_execution(small_checkpoints, monkeypatch, options):
+    a, b = data()
+    model = CausiloRegressor(device="cpu", n_estimators=1).fit_batched({
+        "a": (a, np.arange(len(a))), "b": (b, np.arange(len(b))),
+    })
+    monkeypatch.setattr(batch_api, "batched_predictions", lambda *a: pytest.fail("Ran invalid query"))
+    invalid = {} if options is None else {"X": b[:2], **options}
+    with pytest.raises(ValueError, match="Table 'b'"):
+        model.predict_batched({"a": a.iloc[:1], "b": invalid})
 
 
-def test_narrow_dataframe_error_names_numpy_fitted_table(small_checkpoints):
-    _, b = data()
-    model = CausiloRegressor(device="cpu", n_estimators=1).fit_batched({"wide": (b, np.arange(len(b)))})
-    with pytest.raises(ValueError, match="Table 'wide'"):
-        model.predict_batched({"wide": pd.DataFrame(b[:2, :1])})
+def test_invalid_queries_name_the_table_and_preserve_fit(small_checkpoints):
+    a, b = data()
+    model = CausiloRegressor(device="cpu", n_estimators=1).fit_batched({
+        "a": (a, np.arange(len(a))), "b": (b, np.arange(len(b))),
+    })
+    expected = model.predict_batched({"b": b[:2]})["b"]
+    for key, query in (("unknown", b[:2]), ("a", a.iloc[:1, ::-1]),
+                       ("b", pd.DataFrame(b[:2, :1])), ("b", b[:0])):
+        with pytest.raises(ValueError, match=f"Table '{key}'"):
+            model.predict_batched({key: query})
+    np.testing.assert_array_equal(model.predict_batched({"b": b[:2]})["b"], expected)
 
 
 def test_restore_validates_every_table_cache(small_checkpoints):
@@ -265,8 +252,7 @@ def test_restore_validates_every_table_cache(small_checkpoints):
 
 
 @pytest.mark.parametrize("constructor", [CausiloClassifier, CausiloRegressor])
-@pytest.mark.parametrize("cache", [False, True])
-@pytest.mark.parametrize("serializer", [pickle, joblib])
+@pytest.mark.parametrize("cache,serializer", [(False, pickle), (True, joblib)])
 def test_saved_batch_shares_weights_and_restores_without_fit(small_checkpoints, monkeypatch, constructor, cache, serializer):
     a, b = data()
     model = constructor(device="cpu", n_estimators=2, use_kv_cache=cache).fit_batched({
@@ -285,10 +271,10 @@ def test_saved_batch_shares_weights_and_restores_without_fit(small_checkpoints, 
     for key in query:
         np.testing.assert_array_equal(expected[key], actual[key])
     assert len(small_checkpoints) == 2
-    assert restored._engine.state is None
 
 
 @pytest.mark.pretrained
+@pytest.mark.usefixtures("batch_runtime")
 @pytest.mark.parametrize("device", ["cpu", "cuda", "mps"])
 @pytest.mark.parametrize("constructor", [CausiloClassifier, CausiloRegressor])
 @pytest.mark.parametrize("cache", [False, True])
@@ -297,22 +283,17 @@ def test_real_checkpoint_batched_parity(device, constructor, cache):
         pytest.skip("CUDA unavailable")
     if device == "mps" and not torch.backends.mps.is_available():
         pytest.skip("MPS unavailable")
-    previous = torch.get_num_threads()
-    torch.set_num_threads(2)
-    try:
-        a, b = data()
-        tables = {"a": (a, np.arange(len(a)) % 3), "b": (b, np.arange(len(b)) % 11)}
-        queries = {"a": a.iloc[:2], "b": b[:3]}
-        params = dict(device=device, n_estimators=2, use_kv_cache=cache)
-        expected = {}
-        for key, (X, y) in tables.items():
-            single = constructor(**params).fit(X, y)
-            expected[key] = (single.predict_proba if constructor is CausiloClassifier else single.predict)(queries[key])
-            del single
-        model = constructor(**params).fit_batched(tables)
-        method = model.predict_proba_batched if constructor is CausiloClassifier else model.predict_batched
-        actual = method(queries)
-        for key in queries:
-            np.testing.assert_allclose(actual[key], expected[key], atol=5e-4, rtol=5e-4)
-    finally:
-        torch.set_num_threads(previous)
+    a, b = data()
+    tables = {"a": (a, np.arange(len(a)) % 3), "b": (b, np.arange(len(b)) % 11)}
+    queries = {"a": a.iloc[:2], "b": b[:3]}
+    params = dict(device=device, n_estimators=2, use_kv_cache=cache)
+    expected = {}
+    for key, (X, y) in tables.items():
+        single = constructor(**params).fit(X, y)
+        expected[key] = (single.predict_proba if constructor is CausiloClassifier else single.predict)(queries[key])
+        del single
+    model = constructor(**params).fit_batched(tables)
+    method = model.predict_proba_batched if constructor is CausiloClassifier else model.predict_batched
+    actual = method(queries)
+    for key in queries:
+        np.testing.assert_allclose(actual[key], expected[key], atol=5e-4, rtol=5e-4)

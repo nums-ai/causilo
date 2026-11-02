@@ -7,28 +7,13 @@ import torch
 
 from causilo.execution.chunks import ChunkPlan
 from causilo.execution.runner import ModelCache, ModelRunner
-from causilo.model import Model, ModelConfig
 from causilo.nn.cache import BlockCache, KVPair
 from causilo.nn.layers.attention import Attention
 
 
 @pytest.fixture
-def small_model(request):
-    with torch.random.fork_rng():
-        torch.manual_seed(71)
-        model = Model(ModelConfig(
-            task=request.param, width=16, expansion=2, group_size=3, frequencies=4,
-            column_latents=5, column_heads=2, column_depths=(2, 2),
-            row_heads=2, row_latents=2, row_depths=(3, 2),
-            prediction_heads=2, prediction_depth=3, outputs=3 if request.param == "classification" else 9,
-        ))
-        for name, value in model.named_parameters():
-            if "latents" in name or name.endswith(("frequencies", "missing")):
-                torch.nn.init.normal_(value, std=0.1)
-    previous = torch.get_num_threads()
-    torch.set_num_threads(2)
-    yield model.eval()
-    torch.set_num_threads(previous)
+def small_model(request, make_batch_model):
+    return make_batch_model(request.param)
 
 
 def tables():
