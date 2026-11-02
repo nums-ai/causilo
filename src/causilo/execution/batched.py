@@ -204,7 +204,7 @@ def batched_predictions(model: Model, items: list[BatchItem], device: torch.devi
     """Yield independently identified member outputs, fusing compatible workloads.
 
     Preserve input order and split only for cache compatibility or memory limits.
-    Callers restore fitted ensemble order by ``item.key`` when reducing outputs.
+    Callers supply each table's members consecutively in fitted ensemble order.
     Query tables must already be validated and contain at least one row.
     """
     with torch.inference_mode():

@@ -121,15 +121,11 @@ def test_completed_tables_release_members_and_preserve_sum_order(small_checkpoin
         key: (x, y) for key in ("a", "b")
     })
     references = {key: [] for key in ("a", "b")}
-    # This order interleaves tables and deliberately changes floating-point
-    # cancellation unless aggregation restores fitted member order.
-    order = [("a", 0), ("b", 2), ("a", 2), ("b", 0), ("a", 1), ("a", 3),
-             ("b", 1), ("b", 3)]
+    # Cancellation makes this sensitive to changes in the fitted sum order.
 
     def predictions(model, items, device):
-        items = {item.key: item for item in items}
-        for key in order:
-            item = items[key]
+        for item in items:
+            key = item.key
             shape = (item.shape[1], 999)
             value = torch.full(shape, [1e20, 1, -1e20, 3][key[1]], dtype=torch.float32)
             references[key[0]].append(weakref.ref(value))

@@ -8,7 +8,7 @@ from .outputs import classification_probabilities, regression_predictions, selec
 
 
 def predict_contexts(model, states, queries, output_options, device):
-    """Execute validated queries and restore table and fitted ensemble order.
+    """Execute validated queries and combine each table's ordered member outputs.
 
     A single-table prediction uses the same path with one context. Fitted state
     and caches are read-only; only temporary execution packs combine members.
@@ -20,7 +20,7 @@ def predict_contexts(model, states, queries, output_options, device):
     rounds = max(len(state.code_datasets) if state.codec is not None else 1 for state in states.values())
     with torch.inference_mode():
         for code_index in range(rounds):
-            items, members_by_id = [], {}
+            items = []
             for key, state in states.items():
                 if state.codec is None:
                     if code_index:
@@ -32,7 +32,6 @@ def predict_contexts(model, states, queries, output_options, device):
                     dataset = state.code_datasets[code_index]
                     caches = None if state.code_caches is None else state.code_caches[code_index]
                 members = dataset.members_by_normalization()
-                members_by_id[key] = members
                 member_caches = (
                     ((member, None) for member in members)
                     if caches is None else state.cached_members(caches, dataset)
@@ -43,21 +42,18 @@ def predict_contexts(model, states, queries, output_options, device):
                         cache=cache,
                         output_type=output_options[key][0],
                     ))
-            pending = {key: {} for key in members_by_id}
+            predictions = []
             for item, value in batched_predictions(model, items, device):
-                key, index = item.key
-                pending[key][index] = value
+                predictions.append((item.member, value))
                 del value
-                members = members_by_id[key]
-                if len(pending[key]) != len(members):
+                if len(predictions) != len(item.fitted.members):
                     continue
-                # Execution may reorder members. Aggregate in fitted order and
-                # release this table's outputs before requesting more work.
-                values = [pending[key][index] for index in range(len(members))]
-                del pending[key]
+                # The scheduler preserves table/member order, including across
+                # memory splits. Finish this table before requesting more work.
+                key = item.key[0]
                 state = states[key]
                 if model.config.task == "classification":
-                    probabilities = classification_probabilities(zip(members, values))
+                    probabilities = classification_probabilities(predictions)
                     if state.codec is None:
                         results[key] = probabilities
                     else:
@@ -65,9 +61,9 @@ def predict_contexts(model, states, queries, output_options, device):
                     del probabilities
                 else:
                     output_type, levels = output_options[key]
-                    result = regression_predictions(values, state.dataset.target_encoder)
+                    result = regression_predictions((value for _, value in predictions), state.dataset.target_encoder)
                     results[key] = select_regression_output(result, output_type, levels)
                     del result
-                del values
+                predictions.clear()
     results.update((key, decoder.finish()) for key, decoder in decoders.items())
     return {key: results[key] for key in queries}
