@@ -1,7 +1,7 @@
-"""Predict with training context recomputed for each ensemble/query batch."""
+"""Execute one uncached member, recovering with query chunks or recomputation."""
 
 import math
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from dataclasses import dataclass
 from typing import Literal
 
@@ -27,16 +27,14 @@ from .runner import ModelRunner
 
 @dataclass(frozen=True)
 class BatchPlan:
-    """Execution route and the member/query batch sizes it should use."""
-
-    members: int
+    """Execution route and query chunk size for one member."""
     queries: int
     mode: Literal["direct", "recompute"] = "direct"
 
 
 @dataclass(frozen=True)
 class BatchPlanner:
-    """Estimate peak live tensors and favor whole-query ensemble batches."""
+    """Estimate packed execution memory and plan single-member recovery."""
 
     config: ModelConfig
     training_rows: int
@@ -56,12 +54,11 @@ class BatchPlanner:
         # Stage partitions share the resident feature grid and one destination grid.
         return members * max(encoding + grid, 3 * grid + context, prediction + grid)
 
-    def choose(self, members: int, queries: int, budget: int, device: torch.device) -> BatchPlan:
-        """Reduce members, then compare query batching with encoder replay work."""
-        for count in range(members, 0, -1):
-            if self.estimate(count, queries, device) <= budget:
-                return BatchPlan(count, queries)
-        replay = BatchPlan(1, queries, mode="recompute")
+    def choose(self, queries: int, budget: int, device: torch.device) -> BatchPlan:
+        """Compare query batching with encoder replay work for one member."""
+        if self.estimate(1, queries, device) <= budget:
+            return BatchPlan(queries)
+        replay = BatchPlan(queries, mode="recompute")
         if self.estimate(1, 1, device) > budget:
             return replay
         low, high = 1, queries
@@ -75,7 +72,7 @@ class BatchPlanner:
         training, extra = self._training_work()
         if self._recompute_state_bytes(queries) < budget and (batches - 1) * training > extra:
             return replay
-        return BatchPlan(1, low)
+        return BatchPlan(low)
 
     def _training_work(self) -> tuple[int, int]:
         """Estimate direct training MACs and the extra MACs needed for replay.
@@ -137,86 +134,50 @@ class BatchPlanner:
         return (trace + rows + keys + summaries + queries * config.outputs) * FP32_BYTES
 
 
-def _feature_batch(
-    fitted: PreparedDataset,
-    transformed: dict[str, np.ndarray],
-    members: tuple[EnsembleMember, ...],
-    query_slice: slice,
-) -> np.ndarray:
-    """Pack (members, training + query rows, features) with training rows first."""
-    tables = []
-    for member in members:
-        training = fitted.training_table(member.normalization)
-        queries = transformed[member.normalization][query_slice]
-        table = np.concatenate((training, queries))
-        tables.append(table[:, member.feature_order])
-        # Only the permuted copies need to stay live until the batch is stacked.
-        del table, training, queries
-    return np.stack(tables)
-
-
-def direct_predictions(
+def predict_direct(
     model: Model,
     fitted: PreparedDataset,
     transformed: dict[str, np.ndarray],
+    member: EnsembleMember,
     device: torch.device,
     reduce_output: Callable[[torch.Tensor], torch.Tensor],
-) -> Iterator[tuple[EnsembleMember, torch.Tensor]]:
-    """Yield each member with all its query outputs on CPU, in execution order.
-
-    An OOM restarts the current member batch, discarding its partial query
-    outputs. Previously yielded member batches remain complete and valid.
-    """
-    members = fitted.members_by_normalization()
-    query_count = len(next(iter(transformed.values())))
+) -> torch.Tensor:
+    """Return one member's CPU outputs, retrying without publishing partial rows."""
+    queries = transformed[member.normalization]
+    query_count = len(queries)
     footprint = BatchPlanner(model.config, len(fitted.features), fitted.features.shape[1])
     budget = execution_budget(device)
     runner = ModelRunner(model)
-    start = 0
-    while start < len(members):
-        completed = False
-        for _ in range(MAX_EXECUTION_ATTEMPTS):
-            plan = footprint.choose(len(members) - start, query_count, budget, device)
-            if plan.mode == "recompute":
-                recompute = RecomputeRunner(model, device)
-                for member in members[start:]:
-                    tables = _feature_batch(fitted, transformed, (member,), slice(0, query_count))
-                    targets = np.stack([fitted.targets_for(member)])
-                    prediction = recompute.predict(
-                        torch.from_numpy(tables).float(), torch.from_numpy(targets).float(), reduce_output
-                    )
-                    del tables, targets
-                    yield member, prediction[0]
-                return
-            selected = members[start : start + plan.members]
-            pieces = []
-            tensor = result = target_tensor = None
-            try:
-                targets = np.stack([fitted.targets_for(member) for member in selected])
-                target_tensor = torch.as_tensor(targets, device=device, dtype=torch.float32)
-                for offset in range(0, query_count, plan.queries):
-                    tables = _feature_batch(
-                        fitted, transformed, selected, slice(offset, offset + plan.queries)
-                    )
-                    tensor = torch.as_tensor(tables, device=device, dtype=torch.float32)
-                    result = runner.predict(tensor, target_tensor)
-                    pieces.append(reduce_output(result).cpu())
-                    del tensor, result
-                completed = True
-            except RuntimeError as error:
-                if not is_out_of_memory(error, device):
-                    raise
-                # Release device references before empty_cache and replanning.
-                # Clear this batch's outputs so retried rows cannot be duplicated.
-                pieces.clear()
-                tensor = result = target_tensor = None
-            if completed:
-                break
-            empty_device_cache(device)
-            budget = min(budget // 2, footprint.estimate(plan.members, plan.queries, device) - 1)
-        if not completed:
-            raise torch.cuda.OutOfMemoryError("Prediction exhausted its memory recovery attempts")
-        result = torch.cat(pieces, dim=1)
-        for member, prediction in zip(selected, result):
-            yield member, prediction
-        start += plan.members
+
+    def feature_batch(section):
+        training = fitted.training_table(member.normalization)
+        table = np.concatenate((training, queries[section]))[:, member.feature_order]
+        return np.ascontiguousarray(table[None], dtype=np.float32)
+
+    targets = np.asarray(fitted.targets_for(member)[None], dtype=np.float32)
+    for _ in range(MAX_EXECUTION_ATTEMPTS):
+        plan = footprint.choose(query_count, budget, device)
+        if plan.mode == "recompute":
+            return RecomputeRunner(model, device).predict(
+                torch.from_numpy(feature_batch(slice(None))), torch.from_numpy(targets), reduce_output
+            )[0]
+        pieces = []
+        tensor = result = target_tensor = None
+        try:
+            target_tensor = torch.as_tensor(targets, device=device)
+            for offset in range(0, query_count, plan.queries):
+                tensor = torch.as_tensor(feature_batch(slice(offset, offset + plan.queries)), device=device)
+                result = runner.predict(tensor, target_tensor)
+                pieces.append(reduce_output(result)[0].cpu())
+                tensor = result = None
+            return torch.cat(pieces, dim=0)
+        except RuntimeError as error:
+            if not is_out_of_memory(error, device):
+                raise
+            # Restart this member after releasing the failed batch and partial
+            # outputs. Already completed members belong to the shared scheduler.
+            pieces.clear()
+            del tensor, result, target_tensor
+        empty_device_cache(device)
+        budget = min(budget // 2, footprint.estimate(1, plan.queries, device) - 1)
+    raise torch.cuda.OutOfMemoryError("Prediction exhausted its memory recovery attempts")

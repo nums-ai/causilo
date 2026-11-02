@@ -3,17 +3,10 @@
 from collections.abc import Mapping
 
 import numpy as np
-import torch
 from sklearn.exceptions import NotFittedError
 
-from .ecoc import ECOCAccumulator
-from .execution.batched import BatchItem, batched_predictions
-from .outputs import (
-    classification_probabilities,
-    regression_predictions,
-    select_regression_output,
-    validate_regression_output,
-)
+from .outputs import validate_regression_output
+from .prediction import predict_contexts
 
 
 def validate_mapping(tables, *, allow_empty=False):
@@ -89,58 +82,5 @@ def predict_batched(estimator, tables):
     if engine.batch_states is None:
         raise ValueError("This estimator was fitted with fit; use predict or refit with fit_batched")
     queries, output_options = _prepare_queries(engine, tables)
-    if not queries:
-        return {}
     states = {key: engine.batch_states[key] for key in queries}
-    results = {}
-    decoders = {key: ECOCAccumulator(state.codec) for key, state in states.items() if state.codec is not None}
-    rounds = max(len(state.code_datasets) if state.codec is not None else 1 for state in states.values())
-    with torch.inference_mode():
-        for code_index in range(rounds):
-            items, members_by_id = [], {}
-            for key, state in states.items():
-                if state.codec is None:
-                    if code_index:
-                        continue
-                    dataset, caches = state.dataset, state.caches
-                else:
-                    if code_index >= len(state.code_datasets):
-                        continue
-                    dataset = state.code_datasets[code_index]
-                    caches = None if state.code_caches is None else state.code_caches[code_index]
-                members = dataset.members_by_normalization()
-                members_by_id[key] = members
-                for index, member in enumerate(members):
-                    items.append(BatchItem(
-                        key=(key, index), fitted=dataset, member=member, transformed=queries[key],
-                        cache=None if caches is None else caches[index],
-                        output_type=output_options[key][0],
-                    ))
-            pending = {key: {} for key in members_by_id}
-            for item, value in batched_predictions(engine.model, items, engine.device):
-                key, index = item.key
-                pending[key][index] = value
-                del value
-                members = members_by_id[key]
-                if len(pending[key]) != len(members):
-                    continue
-                # Execution may reorder members. Aggregate in fitted order and
-                # release this table's outputs before requesting more work.
-                values = [pending[key][index] for index in range(len(members))]
-                del pending[key]
-                state = states[key]
-                if engine.task == "classification":
-                    probabilities = classification_probabilities(zip(members, values))
-                    if state.codec is None:
-                        results[key] = probabilities
-                    else:
-                        decoders[key].add(probabilities)
-                    del probabilities
-                else:
-                    output_type, levels = output_options[key]
-                    result = regression_predictions(values, state.dataset.target_encoder)
-                    results[key] = select_regression_output(result, output_type, levels)
-                    del result
-                del values
-    results.update((key, decoder.finish()) for key, decoder in decoders.items())
-    return {key: results[key] for key in tables}
+    return predict_contexts(engine.model, states, queries, output_options, engine.device)

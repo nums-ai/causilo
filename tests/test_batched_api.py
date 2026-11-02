@@ -12,7 +12,7 @@ from sklearn.base import clone
 from sklearn.exceptions import NotFittedError
 
 from causilo import CausiloClassifier, CausiloRegressor, checkpoints
-from causilo import batch as batch_api
+from causilo import prediction as prediction_pipeline
 from causilo.execution.runner import ModelRunner
 
 
@@ -86,6 +86,34 @@ def test_regressor_mixed_outputs_scales_and_batch_composition(small_checkpoints,
         np.testing.assert_allclose(alone, single_b.predict(b[:2], output_type=output), atol=2e-4, rtol=2e-5)
 
 
+@pytest.mark.parametrize("constructor", [CausiloClassifier, CausiloRegressor])
+@pytest.mark.parametrize("cache", [False, True])
+def test_single_prediction_fuses_ensemble_and_matches_memberwise_execution(
+    small_checkpoints, monkeypatch, constructor, cache,
+):
+    from causilo.execution import batched
+
+    _, x = data()
+    model = constructor(device="cpu", n_estimators=8, use_kv_cache=cache).fit(x, np.arange(len(x)) % 3)
+    predict = model.predict_proba if constructor is CausiloClassifier else model.predict
+    method_name = "predict_cached" if cache else "predict"
+    original = getattr(ModelRunner, method_name)
+    batch_sizes = []
+
+    def observed(runner, features, context, **kwargs):
+        batch_sizes.append(len(features))
+        return original(runner, features, context, **kwargs)
+
+    monkeypatch.setattr(ModelRunner, method_name, observed)
+    fused = predict(x[:3])
+    assert batch_sizes == [8]
+    batch_sizes.clear()
+    monkeypatch.setattr(batched, "execution_budget", lambda device: 1)
+    independent = predict(x[:3])
+    assert batch_sizes == [1] * 8
+    np.testing.assert_allclose(fused, independent, atol=2e-5, rtol=2e-5)
+
+
 def test_completed_tables_release_members_and_preserve_sum_order(small_checkpoints, monkeypatch):
     x = np.arange(12).reshape(6, 2)
     y = np.tile([-1.0, 1.0], 3)  # identity target scaling
@@ -110,16 +138,16 @@ def test_completed_tables_release_members_and_preserve_sum_order(small_checkpoin
             if key[1] == 3:
                 assert all(reference() is None for reference in references[key[0]])
 
-    monkeypatch.setattr(batch_api, "batched_predictions", predictions)
+    monkeypatch.setattr(prediction_pipeline, "batched_predictions", predictions)
     raw_outputs = []
-    aggregate = batch_api.regression_predictions
+    aggregate = prediction_pipeline.regression_predictions
 
     def observed(*args):
         result = aggregate(*args)
         raw_outputs.append(weakref.ref(result))
         return result
 
-    monkeypatch.setattr(batch_api, "regression_predictions", observed)
+    monkeypatch.setattr(prediction_pipeline, "regression_predictions", observed)
     results = model.predict_batched({
         key: {"X": x[:rows], "output_type": "median"} for key, rows in (("b", 3), ("a", 2))
     })
@@ -220,7 +248,7 @@ def test_bad_options_validate_all_tables_before_execution(small_checkpoints, mon
     model = CausiloRegressor(device="cpu", n_estimators=1).fit_batched({
         "a": (a, np.arange(len(a))), "b": (b, np.arange(len(b))),
     })
-    monkeypatch.setattr(batch_api, "batched_predictions", lambda *a: pytest.fail("Ran invalid query"))
+    monkeypatch.setattr(prediction_pipeline, "batched_predictions", lambda *a: pytest.fail("Ran invalid query"))
     invalid = {} if options is None else {"X": b[:2], **options}
     with pytest.raises(ValueError, match="Table 'b'"):
         model.predict_batched({"a": a.iloc[:1], "b": invalid})

@@ -8,24 +8,25 @@ import torch
 from sklearn.exceptions import NotFittedError
 
 from causilo import CausiloRegressor, checkpoints
-from causilo import engine as engine_module
+from causilo import prediction as prediction_pipeline
 from causilo.execution.runner import ModelRunner
+from causilo.outputs import reduce_regression_output
 from causilo.quantiles import interpolate_quantiles, validate_quantiles
 
 
 @pytest.fixture
 def known_head_outputs(monkeypatch):
-    pretrained = SimpleNamespace(config=SimpleNamespace(outputs=3))
+    pretrained = SimpleNamespace(config=SimpleNamespace(outputs=3, task="regression"))
     pretrained.to = lambda device: pretrained
     monkeypatch.setattr(checkpoints, "load_pretrained_model", lambda task: pretrained)
 
-    def predictions(model, fitted, transformed, device, reduce_output):
+    def predictions(model, items, device):
         # Crossed member outputs distinguish sorting each member from sorting the average.
         raw = [[[9.0, -1.0, 1.0], [4.0, 0.0, 2.0]], [[0.0, 4.0, 2.0], [6.0, 0.0, -6.0]]]
-        for member, values in zip(fitted.members_by_normalization(), raw):
-            yield member, reduce_output(torch.tensor(values))
+        for item, values in zip(items, raw):
+            yield item, reduce_regression_output(torch.tensor(values), item.output_type)
 
-    monkeypatch.setattr(engine_module, "direct_predictions", predictions)
+    monkeypatch.setattr(prediction_pipeline, "batched_predictions", predictions)
     return CausiloRegressor(n_estimators=2, device="cpu").fit([[0.0], [1.0]], [10.0, 14.0])
 
 
@@ -55,8 +56,7 @@ def test_output_modes_and_requested_order(known_head_outputs):
 ])
 def test_invalid_requests_fail_before_inference(known_head_outputs, options, monkeypatch):
     model = known_head_outputs
-    monkeypatch.setattr(model._engine, 'predict_raw', lambda X: pytest.fail('Ran inference'))
-    monkeypatch.setattr(model._engine, 'predict', lambda X: pytest.fail('Ran inference'))
+    monkeypatch.setattr(model._engine, 'predict', lambda *a, **kw: pytest.fail('Ran inference'))
     with pytest.raises(ValueError):
         model.predict([[0.0]], **options)
 
@@ -131,7 +131,7 @@ def test_pretrained_outputs_and_restore(cache, retain, monkeypatch):
 @pytest.mark.pretrained
 @pytest.mark.parametrize('cache', [False, True])
 def test_pretrained_output_partitioning(cache, monkeypatch):
-    from causilo.execution import cached
+    from causilo.execution import batched, cached
     from causilo.execution.direct import BatchPlan, BatchPlanner
 
     torch.set_num_threads(2)
@@ -141,9 +141,20 @@ def test_pretrained_output_partitioning(cache, monkeypatch):
         table, 10 + 2*rng.normal(size=24))
     options = dict(output_type='quantiles', quantiles=[1e-6, .05, .5, .95, 1-1e-6])
     expected = model.predict(table[:7], **options)
+    monkeypatch.setattr(batched, "execution_budget", lambda device: 1)
     if cache:
         monkeypatch.setattr(cached, 'execution_budget', lambda device: 64)
         monkeypatch.setattr(cached, 'query_memory', lambda shape, features, training_rows, queries, device: 32*queries)
     else:
-        monkeypatch.setattr(BatchPlanner, 'choose', lambda *args: BatchPlan(1, 2))
+        monkeypatch.setattr(BatchPlanner, 'choose', lambda *args: BatchPlan(2))
+    method_name = "predict_cached" if cache else "predict"
+    original = getattr(ModelRunner, method_name)
+    chunks = []
+
+    def observed(runner, features, context):
+        chunks.append(features.shape[1] if cache else features.shape[1] - context.shape[1])
+        return original(runner, features, context)
+
+    monkeypatch.setattr(ModelRunner, method_name, observed)
     np.testing.assert_allclose(model.predict(table[:7], **options), expected, atol=2e-3, rtol=2e-4)
+    assert max(chunks) <= 2 and sum(chunks) == 4 * 7

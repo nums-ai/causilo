@@ -2,7 +2,7 @@
 
 import math
 from collections.abc import Iterator
-from dataclasses import dataclass, replace
+from dataclasses import dataclass
 
 import numpy as np
 import torch
@@ -12,8 +12,8 @@ from ..data.ensemble import EnsembleMember
 from ..model import Model
 from ..nn.cache import BlockCache, KVPair
 from ..outputs import reduce_regression_output
-from .cached import cached_predictions, query_memory
-from .direct import BatchPlanner, direct_predictions
+from .cached import predict_cached, query_memory
+from .direct import BatchPlanner, predict_direct
 from .memory import FP32_BYTES, empty_device_cache, execution_budget, is_out_of_memory
 from .runner import ModelCache, ModelRunner
 
@@ -26,7 +26,7 @@ MAX_PADDING_RATIO = 4.0
 class BatchItem:
     """One table/member prediction, with an optional unpadded fitted cache."""
 
-    key: tuple[str, int]
+    key: tuple[str | int, int]
     fitted: PreparedDataset
     member: EnsembleMember
     transformed: dict[str, np.ndarray]
@@ -149,14 +149,12 @@ def _singleton(model, item, device):
     def reduce_output(value):
         return _reduce(model, item, value)
     if item.cache is None:
-        fitted = replace(item.fitted, members=(item.member,))
-        predictions = direct_predictions(model, fitted, item.transformed, device, reduce_output)
+        result = predict_direct(model, item.fitted, item.transformed, item.member, device, reduce_output)
     else:
-        predictions = cached_predictions(
-            model, item.fitted, item.transformed, ((item.member, item.cache),), device, reduce_output
+        result = predict_cached(
+            model, item.fitted, item.transformed, item.member, item.cache, device, reduce_output
         )
-    for _, result in predictions:
-        yield item, result
+    yield item, result
 
 
 def _run_group(model, items, device) -> Iterator[tuple[BatchItem, torch.Tensor]]:

@@ -12,10 +12,8 @@ from . import checkpoints
 from .data.dataset import PreparedDataset
 from .data.ensemble import EnsembleMember
 from .ecoc import ECOCCodec
-from .execution.cached import cached_predictions
-from .execution.direct import direct_predictions
 from .execution.runner import ModelCache, ModelRunner
-from .outputs import classification_probabilities, reduce_regression_output, regression_predictions
+from .prediction import predict_contexts
 
 
 def resolve_device(request: str) -> torch.device:
@@ -184,53 +182,12 @@ class Engine:
             raise NotFittedError("Call fit successfully before prediction")
         return self.state
 
-    def _member_predictions(self, transformed, state, reduce_output, *, fitted=None, caches=None):
-        """Select direct or cached execution using already transformed queries."""
-        fitted = state.dataset if fitted is None else fitted
-        caches = state.caches if caches is None else caches
-        if caches is None:
-            return direct_predictions(self.model, fitted, transformed, self.device, reduce_output)
-        return cached_predictions(
-            self.model, fitted, transformed, state.cached_members(caches, fitted), self.device, reduce_output
-        )
-
-    def _classification_probabilities(self, transformed, state, *, fitted=None, caches=None) -> np.ndarray:
-        return classification_probabilities(self._member_predictions(
-            transformed, state, lambda value: value, fitted=fitted, caches=caches
-        ))
-
-    def _regression_predictions(self, transformed, state, output_type):
-        def reduce_output(result):
-            return reduce_regression_output(result, output_type)
-
-        with torch.inference_mode():
-            predictions = self._member_predictions(transformed, state, reduce_output)
-            return regression_predictions((result for _, result in predictions), state.dataset.target_encoder)
-
-    def predict(self, table) -> np.ndarray:
-        """Return class probabilities or regression point predictions."""
+    def predict(self, table, *, output_type="mean", levels=None) -> np.ndarray:
+        """Run a single fitted context through the shared prediction pipeline."""
         state = self.require_state()
         transformed = state.dataset.query_tables(table)
-        if self.task == "classification" and state.codec is not None:
-            with torch.inference_mode():
-
-                def row_probabilities():
-                    for index, fitted in enumerate(state.code_datasets):
-                        caches = None if state.code_caches is None else state.code_caches[index]
-                        yield self._classification_probabilities(
-                            transformed, state, fitted=fitted, caches=caches
-                        )
-
-                return state.codec.decode_rows(row_probabilities())
-        if self.task == "classification":
-            with torch.inference_mode():
-                return self._classification_probabilities(transformed, state)
-        return self._regression_predictions(transformed, state, "mean")
-
-    def predict_raw(self, table) -> np.ndarray:
-        """Sort each member, restore target units, then average matching quantiles."""
-        state = self.require_state()
-        if self.task != "regression":
-            raise ValueError("Quantile prediction requires a regression model")
-        transformed = state.dataset.query_tables(table)
-        return self._regression_predictions(transformed, state, "raw")
+        if not len(next(iter(transformed.values()))):
+            raise ValueError("Query table must contain at least one row")
+        return predict_contexts(
+            self.model, {0: state}, {0: transformed}, {0: (output_type, levels)}, self.device
+        )[0]

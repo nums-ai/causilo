@@ -108,10 +108,11 @@ Tile sizes adapt to available memory, and OOM retries shrink failed tiles.
 Retained states and a layer's full training K/V must still fit on the device;
 intermediate CPU offloading is not supported.
 
-### Batched prediction
+### Execution batches
 
-Batched prediction groups similarly sized tables and ensemble members into
-bounded execution batches. If memory is insufficient, it reduces the batch
+Single-table and batched prediction use the same execution pipeline. It groups
+similarly sized tables and ensemble members into bounded execution batches,
+with or without a fitted K/V cache. If memory is insufficient, it reduces the batch
 size and falls back to single-member query partitioning or recomputation,
 preserving all training rows and ensemble members.
 

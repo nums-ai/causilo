@@ -5,7 +5,7 @@ from sklearn.base import BaseEstimator, ClassifierMixin, RegressorMixin
 from sklearn.exceptions import NotFittedError
 
 from .engine import Engine
-from .outputs import select_regression_output, validate_regression_output
+from .outputs import validate_regression_output
 from .serialization import export_estimator, import_estimator
 
 
@@ -246,11 +246,7 @@ class CausiloRegressor(RegressorMixin, BaseEstimator):
         quantiles returns (rows, requested levels) for probabilities in (0, 1).
         """
         levels = validate_regression_output(output_type, quantiles)
-        engine = fitted_engine(self)
-        if output_type == "mean":
-            return engine.predict(X)
-        raw = engine.predict_raw(X)
-        return select_regression_output(raw, output_type, levels)
+        return fitted_engine(self).predict(X, output_type=output_type, levels=levels)
 
     def fit_batched(self, tables):
         """Fit independent contexts from {table_id: (X, y)}; return self."""
