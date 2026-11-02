@@ -1,5 +1,89 @@
 # Inference details
 
+## Independent table batches
+
+Both estimators support independent fitted contexts keyed by nonempty string IDs.
+Tables may have different training/query row counts, feature schemas, and class
+sets. Each query must match its own fitted table's schema.
+
+```python
+from causilo import CausiloRegressor
+
+regressor = CausiloRegressor(device="cuda", n_estimators=8)
+regressor.fit_batched({
+    "sales": (X_train_sales, y_train_sales),
+    "price": (X_train_price, y_train_price),
+})
+predictions = regressor.predict_batched({
+    "sales": X_test_sales,  # mean output
+    "price": {
+        "X": X_test_price,
+        "output_type": "quantiles",
+        "quantiles": [0.1, 0.5, 0.9],
+    },
+})
+```
+
+Results are dictionaries in query ID order. IDs, not positions, match queries
+to contexts. Query any subset repeatedly; an empty query mapping returns `{}`.
+Individual query tables must contain at least one row. Unknown IDs, schema
+mismatches, and invalid per-table options raise errors naming the table. All
+queries are validated before prediction starts; prediction does not refit or
+replace any context. There are no common output options or `overrides` argument.
+
+For classification, use `predict_batched({id: X})` for original labels and
+`predict_proba_batched({id: X})` for probabilities. Each probability matrix's
+columns follow `classes_batched_[id]`; different tables may have different
+classes, including many-class ECOC contexts. Batch fits expose
+`n_features_in_batched_` and `feature_names_in_batched_` (the latter contains only
+IDs fitted with string-named DataFrame columns), without changing the types of
+the single-table sklearn attributes.
+
+`fit_batched` returns `self`. Each `fit` or `fit_batched` replaces the entire
+previous fit, including when a refit fails. Single-table prediction requires
+`fit`; batched prediction requires `fit_batched`. Construction and sklearn
+cloning remain lazy and unfitted. Settings such as `checkpoint_path`, `device`, `n_estimators`,
+`random_state`, `retain_preprocessing`, and `use_kv_cache` apply to all tables and
+take effect on refit. Preprocessing, target scaling, category mappings, and
+seeded ensemble permutations remain independent per table.
+
+Weights are shared. The execution planner groups similarly sized table/member
+items into bounded microbatches. It preserves partial final feature groups with
+numeric-zero padding, excludes extra groups and padded context rows from
+attention, and uses the valid context length for query scaling. Query padding
+is removed before per-table aggregation. Same-size inputs avoid unnecessary
+masks. OOM recovery reduces the execution batch and then uses the existing
+single-member query partitioning/recomputation paths, retaining all training
+rows and ensemble members. Different regression output modes can share one
+execution batch; outputs are restored to each table's target units.
+
+As soon as all ensemble members for a table are available, prediction aggregates
+them in fitted member order and releases their intermediate outputs. Completed
+tables therefore do not accumulate member outputs across the whole request.
+Temporary execution batches, incomplete tables, transformed queries, and final
+results still consume memory. Median outputs own their storage rather than
+retaining the full native-quantile matrix.
+
+With `use_kv_cache=True`, fit builds unpadded per-table/member caches. Prediction
+temporarily packs compatible caches for batched execution and accounts for
+their additional memory. Pickle/joblib save all contexts under a separate
+batched-state schema, omit weights, and enforce the same runtime/revision
+checks as single-table serialization. Restoring caches never rebuilds them.
+
+Batch composition can change floating-point rounding. Numerical equivalence
+within device-appropriate tolerances is the contract, not bitwise equality
+between independent and batched execution. CUDA throughput and memory usage
+must be measured on the intended workload and hardware.
+
+Batch validation uses the pinned checkpoint
+`94f2bd91db0737d4da59f347910662905ecb5a09`. On Apple M5 Pro with Python 3.12.15
+and PyTorch 2.13.0, the offline suite passed 276 tests (15 device-related skips)
+and the full pretrained suite passed 72 tests (10 device-related skips).
+CPU and explicit MPS were covered; CUDA remains unverified.
+See [the batch example](../examples/batched_prediction.py) and
+[the benchmark](../examples/benchmark_batched.py) for runnable usage and a
+small synthetic sequential-versus-batched comparison.
+
 ## Regression outputs
 
 For `CausiloRegressor`, choose the prediction output with `output_type`:

@@ -131,6 +131,36 @@ def test_default_route_preserves_legacy_saved_state(constructor, task, checkpoin
     assert calls == [task, task]
 
 
+@pytest.mark.parametrize("cache", [False, True])
+def test_batched_local_checkpoint_identity_and_refit(
+    constructor, task, checkpoint_factory, data, cache, monkeypatch,
+):
+    first = checkpoint_factory(task, "first")
+    second = checkpoint_factory(task, "second", 72)
+    x, y = data
+    tables = {"a": (x, y), "b": (x[:15, :3], y[:15])}
+    queries = {"b": x[:2, :3], "a": x[:3]}
+    estimator = constructor(n_estimators=2, device="cpu", use_kv_cache=cache, checkpoint_path=first)
+    estimator.fit_batched(tables)
+    method = "predict_proba_batched" if task == "classification" else "predict_batched"
+    expected = getattr(estimator, method)(queries)
+    estimator.set_params(checkpoint_path=second)
+    with monkeypatch.context() as patch:
+        patch.setattr(ModelRunner, "build_cache", lambda *a, **k: pytest.fail("Rebuilt saved cache"))
+        restored = pickle.loads(pickle.dumps(estimator))
+    assert restored.checkpoint_path == second
+    assert restored._engine.checkpoint["path"] == str(first)
+    actual = getattr(restored, method)(queries)
+    for key in queries:
+        np.testing.assert_array_equal(actual[key], expected[key])
+    restored.fit_batched(tables)
+    assert restored._engine.checkpoint["path"] == str(second)
+    payload = pickle.dumps(restored)
+    checkpoint_factory(task, "second", 91)
+    with pytest.raises(ValueError, match="differs from the weights used to fit"):
+        pickle.loads(payload)
+
+
 def test_legacy_unfitted_state_supplies_new_default(constructor):
     saved = constructor().__getstate__()
     saved.pop("checkpoint")

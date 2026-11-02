@@ -16,10 +16,10 @@ class ColumnLayer(nn.Module):
         self.gather = AttentionLayer(width, heads, expansion)
         self.broadcast = AttentionLayer(width, heads, expansion, scale_query=False)
 
-    def prepare(self, training: Tensor) -> KVPair:
+    def prepare(self, training: Tensor, *, key_lengths: Tensor | None = None) -> KVPair:
         """Compress (*batch, training_rows, width) into column_latents context slots."""
         latents = self.latents.expand(*training.shape[:-2], *self.latents.shape)
-        latents = self.gather(latents, training)
+        latents = self.gather(latents, training, key_lengths=key_lengths)
         return self.broadcast.prepare(latents)
 
 
@@ -30,10 +30,13 @@ class ColumnBlock(nn.Module):
         super().__init__()
         self.layers = nn.ModuleList(ColumnLayer(width, heads, expansion, latents) for _ in range(depth))
 
-    def forward(self, rows: Tensor, *, context_rows: int) -> Tensor:
+    def forward(
+        self, rows: Tensor, *, context_rows: int, key_lengths: Tensor | None = None
+    ) -> Tensor:
         """Update (*batch, training + query rows, width) using only the training prefix."""
         for layer in self.layers:
-            keys = layer.prepare(rows[..., :context_rows, :])
+            training = rows[..., :context_rows, :]
+            keys = layer.prepare(training) if key_lengths is None else layer.prepare(training, key_lengths=key_lengths)
             rows = layer.broadcast.query(rows, keys)
         return rows
 

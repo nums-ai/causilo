@@ -162,15 +162,17 @@ class CacheRunner:
                 training = cache = result = None
             plan.shrink()
 
-    def query(self, component, rows, state: BlockCache, stage: Stage):
+    def query(self, component, rows, state: BlockCache, stage: Stage, *, key_lengths: Tensor | None = None):
         """Select matching K/V items for each query chunk; retain the full context axis."""
         keys = reshape_keys(state, (-1,))
+        lengths = None if key_lengths is None else key_lengths.expand(rows.shape[:-2]).reshape(-1)
         workload = Workload(stage, rows.shape[-2], rows.shape[-1], keys.layers[0].key.shape[-2])
 
         def apply(part, section):
             selected = BlockCache(
                 tuple(KVPair(layer.key[section], layer.value[section]) for layer in keys.layers)
             )
-            return component.query(part, selected)
+            options = {} if lengths is None else {"key_lengths": lengths[section]}
+            return component.query(part, selected, **options)
 
         return ChunkRunner().run_indexed(apply, rows, workload)
