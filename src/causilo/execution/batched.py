@@ -151,7 +151,14 @@ def _execute(model, items, device):
         result = runner.predict_cached(table, context, **lengths)
     else:
         result = runner.predict(table, torch.as_tensor(targets, device=device), **lengths)
-    return [_reduce(model, item, result[index, : item.shape[1]]).cpu() for index, item in enumerate(items)]
+    # CPU logits are views into the full batch; give each member independent
+    # storage so unfinished tables cannot keep completed tables' outputs alive.
+    return [
+        _reduce(model, item, result[index, : item.shape[1]]).to(
+            "cpu", copy=model.config.task == "classification"
+        )
+        for index, item in enumerate(items)
+    ]
 
 
 def _singleton(model, item, device):
@@ -179,7 +186,11 @@ def _run_group(model, items, device) -> Iterator[tuple[BatchItem, torch.Tensor]]
             if not isinstance(error, MemoryError) and not is_out_of_memory(error, device):
                 raise
         if outputs is not None:
-            yield from zip(items, outputs)
+            # Drop the scheduler's reference before yielding, allowing each
+            # completed table to release its outputs during reconstruction.
+            outputs.reverse()
+            for item in items:
+                yield item, outputs.pop()
             return
         empty_device_cache(device)
     # Split after dropping the failed call's tensors. Each child retains all

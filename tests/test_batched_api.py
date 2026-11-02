@@ -159,6 +159,60 @@ def test_completed_tables_release_members_and_preserve_sum_order(small_checkpoin
     assert all(reference() is None for refs in references.values() for reference in refs)
 
 
+@pytest.mark.parametrize("constructor,output_type", [
+    (CausiloClassifier, None), (CausiloRegressor, "median"), (CausiloRegressor, "quantiles"),
+])
+@pytest.mark.parametrize("cache", [False, True])
+def test_real_scheduler_releases_completed_table_outputs(
+    small_checkpoints, monkeypatch, constructor, output_type, cache,
+):
+    from causilo.execution import batched
+
+    a, b = data()
+    model = constructor(device="cpu", n_estimators=2, use_kv_cache=cache).fit_batched({
+        "a": (a, np.arange(len(a)) % 3), "b": (b, np.arange(len(b)) % 3),
+    })
+    queries = {"b": b[:3], "a": a.iloc[:2]}
+    if output_type is not None:
+        options = {"output_type": output_type}
+        if output_type == "quantiles":
+            options["quantiles"] = [0.1, 0.9]
+        queries = {key: {"X": value, **options} for key, value in queries.items()}
+    method = model.predict_proba_batched if output_type is None else model.predict_batched
+    expected = method(queries)
+    references = {key: [] for key in queries}
+    groups, completed = [], []
+    execute = batched._execute
+
+    def observed_execute(model, items, device):
+        outputs = execute(model, items, device)
+        groups.append(len(items))
+        # CPU classification slices must not retain the entire batched tensor's
+        # storage through the outputs for tables that have not completed yet.
+        assert len({value.untyped_storage().data_ptr() for value in outputs}) == len(outputs)
+        for item, value in zip(items, outputs):
+            references[item.key[0]].append(weakref.ref(value))
+        return outputs
+
+    name = "classification_probabilities" if output_type is None else "regression_predictions"
+    aggregate = getattr(prediction_pipeline, name)
+
+    def observed_aggregate(*args):
+        for key in completed:
+            assert all(reference() is None for reference in references[key])
+        result = aggregate(*args)
+        completed.append(list(queries)[len(completed)])
+        return result
+
+    monkeypatch.setattr(batched, "_execute", observed_execute)
+    monkeypatch.setattr(prediction_pipeline, name, observed_aggregate)
+    actual = method(queries)
+    assert groups == [4] and completed == list(queries)
+    assert all(reference() is None for refs in references.values() for reference in refs)
+    for key in queries:
+        np.testing.assert_array_equal(actual[key], expected[key])
+
+
 @pytest.mark.parametrize("constructor", [CausiloClassifier, CausiloRegressor])
 def test_mode_changes_failed_refits_and_clone(small_checkpoints, constructor):
     a, _ = data()

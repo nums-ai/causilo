@@ -79,7 +79,7 @@ def test_scheduler_fuses_and_preserves_item_identity(setup, cache, monkeypatch):
 
 
 @pytest.mark.parametrize("cache", [False, True])
-@pytest.mark.parametrize("error_type", [MemoryError, torch.cuda.OutOfMemoryError])
+@pytest.mark.parametrize("error_type", [MemoryError, torch.cuda.OutOfMemoryError, RuntimeError])
 def test_oom_splits_without_losing_or_duplicating_outputs(setup, cache, error_type, monkeypatch):
     model, items, device = setup
     if cache:
@@ -91,7 +91,10 @@ def test_oom_splits_without_losing_or_duplicating_outputs(setup, cache, error_ty
     def fail_large(model, items, device):
         attempted.append(len(items))
         if len(items) > 2:
-            raise error_type("injected multi-table OOM")
+            message = "injected multi-table OOM"
+            if error_type is RuntimeError:
+                message = "DefaultCPUAllocator: can't allocate memory: you tried to allocate 1024 bytes"
+            raise error_type(message)
         return original(model, items, device)
 
     monkeypatch.setattr(batched, "_execute", fail_large)
@@ -138,15 +141,16 @@ def test_cached_execution_preserves_fitted_contexts(setup):
         torch.testing.assert_close(tensor, snapshot, atol=0, rtol=0)
 
 
-def test_non_oom_failure_is_not_retried(setup, monkeypatch):
+@pytest.mark.parametrize("message", ["invalid model input", "DefaultCPUAllocator: invalid allocation request"])
+def test_non_oom_failure_is_not_retried(setup, monkeypatch, message):
     model, items, device = setup
     calls = []
 
     def fail(*args):
         calls.append(1)
-        raise RuntimeError("invalid model input")
+        raise RuntimeError(message)
 
     monkeypatch.setattr(batched, "_execute", fail)
-    with pytest.raises(RuntimeError, match="invalid model input"):
+    with pytest.raises(RuntimeError, match=message):
         collect(model, items, device)
     assert len(calls) == 1
