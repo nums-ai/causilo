@@ -107,24 +107,20 @@ Ensembles cycle through none, rank2gaussian, robust and power normalization. See
 
 ## Independent table batches
 
-Fit multiple independent tables with string IDs and predict any subset. Tables
-may differ in row count, feature count, and classes; weights are shared.
+Fit independent tables with string IDs, sharing model weights. Tables may have
+different row counts, feature counts, and classes.
 
 ```python
 regressor.fit_batched({
     "sales": (X_train_sales, y_train_sales),
     "price": (X_train_price, y_train_price),
 })
-predictions = regressor.predict_batched({
-    "sales": X_test_sales,
-    "price": {"X": X_test_price, "output_type": "quantiles", "quantiles": [0.1, 0.9]},
-})
+predictions = regressor.predict_batched({"sales": X_test_sales, "price": X_test_price})
 ```
 
-Classifiers provide `predict_batched` and `predict_proba_batched`, with each
-probability matrix's classes in `classes_batched_[table_id]`. See
-[batch inference](docs/inference.md#independent-table-batches) for per-table
-options, fitted-state behavior, caching, and serialization.
+Classifiers also provide `predict_batched` and `predict_proba_batched`. See
+[batch inference](docs/inference.md#independent-table-batches) for ID matching,
+per-table output options, and fitted-state behavior.
 
 ## Repeated prediction
 
