@@ -70,7 +70,7 @@ def test_large_frequencies_do_not_expand_rows(monkeypatch):
 
 @pytest.mark.parametrize("weights", [[True, False], [1, np.inf], [2**53, 1], [2**64 - 1, 1], [[1], [2]]])
 def test_rejects_invalid_or_inexact_counts(weights):
-    with pytest.raises(ValueError, match="sample_weight"):
+    with pytest.raises(ValueError, match="sample_count"):
         validate_frequencies(weights, 2)
 
 

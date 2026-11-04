@@ -8,17 +8,17 @@ import sklearn
 from scipy import optimize, special, stats
 
 
-def validate_frequencies(sample_weight, rows):
+def validate_frequencies(sample_count, rows):
     """Return owned integer counts; reject importance weights and unsafe totals."""
-    weights = np.asarray(sample_weight)
+    weights = np.asarray(sample_count)
     if weights.shape != (rows,) or weights.dtype.kind not in "iuf":
-        raise ValueError("sample_weight must contain one integer frequency per training row")
+        raise ValueError("sample_count must contain one integer repetition count per training row")
     if not np.isfinite(weights).all() or (weights < 0).any() or (weights != np.floor(weights)).any():
-        raise ValueError("sample_weight frequencies must be finite nonnegative integers")
+        raise ValueError("sample_count must contain finite nonnegative integers")
     # Float64 preprocessing must be able to represent the total exactly. Check
     # before casting so unsigned integers and large floats cannot wrap around.
     if not 0 < sum(map(int, weights)) <= 2**53:
-        raise ValueError("Total sample_weight frequency must be between 1 and 2**53")
+        raise ValueError("Total sample_count must be between 1 and 2**53")
     return weights.astype(np.int64, copy=True)
 
 

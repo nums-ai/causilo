@@ -123,12 +123,12 @@ restoration is not supported by this interface.
 
 ## Aggregated observations and repetition counts
 
-Both estimators accept optional `sample_weight` in `fit`. Here a weight is an
+Both estimators accept optional `sample_count` in `fit`. Each entry is an
 **integer repetition count**: a row with count 30 represents 30 identical
 observations with the same features and target. Counts are not loss weights or
 arbitrary importance scores. Omitting them keeps the usual `fit(X, y)` behavior.
 Counts are supported by ordinary `fit`; `fit_batched` continues to accept
-`{table_id: (X, y)}` pairs without a weight argument.
+`{table_id: (X, y)}` pairs without a count argument.
 
 For binomial data, represent each group by a success row and a failure row:
 
@@ -143,7 +143,7 @@ X = X_group[rows]
 y = np.tile([1, 0], len(X_group))
 counts = np.column_stack([successes, trials - successes]).ravel()
 
-classifier = CausiloClassifier().fit(X, y, sample_weight=counts)
+classifier = CausiloClassifier().fit(X, y, sample_count=counts)
 p_success = classifier.predict_proba(X_test)[:, list(classifier.classes_).index(1)]
 ```
 

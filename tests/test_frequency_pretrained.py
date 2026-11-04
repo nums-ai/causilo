@@ -35,7 +35,7 @@ def test_official_frequency_fit_matches_expansion(kind, cache, monkeypatch):
     query = table.iloc[[2, 3, 6]].copy()
     options = dict(n_estimators=8, device="cpu", use_kv_cache=cache)
     expanded = kind(**options).fit(table.iloc[indices], labels[indices])
-    weighted = kind(**options).fit(table, labels, sample_weight=weights)
+    weighted = kind(**options).fit(table, labels, sample_count=weights)
 
     def predict(model):
         return model.predict_proba(query) if kind is CausiloClassifier else model.predict(query, output_type="raw")
@@ -61,7 +61,7 @@ def test_official_missing_mean_rank_ties_match_expansion(tie, cache, monkeypatch
     expanded = CausiloClassifier(**options).fit(
         np.repeat(table, weights, axis=0), np.repeat(labels, weights)
     )
-    weighted = CausiloClassifier(**options).fit(table, labels, sample_weight=weights)
+    weighted = CausiloClassifier(**options).fit(table, labels, sample_count=weights)
     expected = expanded.predict_proba(query)
     np.testing.assert_allclose(weighted.predict_proba(query), expected, atol=2e-5, rtol=2e-5)
     if not cache:

@@ -89,14 +89,14 @@ class Engine:
         use_kv_cache: bool,
         retain_preprocessing: bool,
         random_state: int,
-        sample_weight=None,
+        sample_count=None,
     ) -> None:
         """Prepare context without optimizing weights; a failed fit stays unfitted."""
         self.state = None
         self.batch_states = None
         self.state = self.prepare_state(
             table, targets, n_estimators=n_estimators, use_kv_cache=use_kv_cache,
-            retain_preprocessing=retain_preprocessing, random_state=random_state, sample_weight=sample_weight,
+            retain_preprocessing=retain_preprocessing, random_state=random_state, sample_count=sample_count,
         )
 
     def prepare_state(
@@ -108,7 +108,7 @@ class Engine:
         use_kv_cache: bool,
         retain_preprocessing: bool,
         random_state: int,
-        sample_weight=None,
+        sample_count=None,
     ) -> FitState:
         """Build a complete context without publishing or replacing fitted state."""
         if isinstance(n_estimators, bool) or not isinstance(n_estimators, Integral) or n_estimators < 1:
@@ -130,7 +130,7 @@ class Engine:
             retain_preprocessing=retain_preprocessing,
             random_state=int(random_state),
             class_permutation_size=self.model.config.outputs,
-            sample_weight=sample_weight,
+            sample_count=sample_count,
         )
         codec = None
         code_datasets = None

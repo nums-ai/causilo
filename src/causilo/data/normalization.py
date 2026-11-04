@@ -23,19 +23,19 @@ class Rank2Gaussian:
     knots: tuple[tuple[np.ndarray, np.ndarray], ...]
 
     @classmethod
-    def fit(cls, table, sample_weight=None):
+    def fit(cls, table, sample_count=None):
         """Store unique values and tie-aware probabilities per feature column."""
         knots = []
         for column in table.T:
-            if sample_weight is None:
+            if sample_count is None:
                 values, counts = np.unique(column, return_counts=True)
                 total = len(column)
             else:
                 values, inverse = np.unique(column, return_inverse=True)
-                counts = np.bincount(inverse, weights=sample_weight)
-                total = sample_weight.sum()
+                counts = np.bincount(inverse, weights=sample_count)
+                total = sample_count.sum()
             probabilities = (np.cumsum(counts) - counts / 2) / total
-            if sample_weight is not None:
+            if sample_count is not None:
                 # Very large totals can round the highest mid-rank to 1.
                 # Keep Gaussian quantiles finite at the supported count limit.
                 probabilities = np.minimum(probabilities, np.nextafter(1.0, 0.0))
@@ -65,18 +65,18 @@ class PowerNormalizer:
         return values
 
     @classmethod
-    def fit(cls, table, sample_weight=None):
+    def fit(cls, table, sample_count=None):
         power = PowerTransformer(standardize=False)
-        if sample_weight is None:
+        if sample_count is None:
             power.fit(table)
         else:
             power.n_features_in_ = table.shape[1]
             power.lambdas_ = np.array([
-                weighted_yeojohnson_lambda(column, sample_weight) for column in table.T
+                weighted_yeojohnson_lambda(column, sample_count) for column in table.T
             ])
         values = cls._power_values(power, table)
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-            scale = StandardScaler(copy=False).fit(values, sample_weight=sample_weight)
+            scale = StandardScaler(copy=False).fit(values, sample_weight=sample_count)
         return cls(power, scale)
 
     def transform(self, table):
@@ -106,18 +106,18 @@ class Normalizer:
     upper: np.ndarray
 
     @classmethod
-    def fit(cls, table: np.ndarray, method: str, sample_weight=None) -> "Normalizer":
+    def fit(cls, table: np.ndarray, method: str, sample_count=None) -> "Normalizer":
         """Fit transforms using optional integer row multiplicities.
 
         Zero-count rows are excluded; unit counts use the original unweighted
         path. All statistics are computed without expanding repeated rows.
         """
-        if sample_weight is not None:
-            sample_weight = validate_frequencies(sample_weight, len(table))
-            present = sample_weight > 0
-            table, sample_weight = table[present], sample_weight[present]
-            if np.all(sample_weight == 1):
-                sample_weight = None
+        if sample_count is not None:
+            sample_count = validate_frequencies(sample_count, len(table))
+            present = sample_count > 0
+            table, sample_count = table[present], sample_count[present]
+            if np.all(sample_count == 1):
+                sample_count = None
         missing = np.isnan(table)
         observed = ~missing
         values = np.where(missing, 0, table)
@@ -125,9 +125,9 @@ class Normalizer:
         # These columns use the grouped mean below; skip their ordinary sum,
         # which may overflow even when the resulting mean is finite.
         values[:, rank_missing] = 0
-        if sample_weight is not None:
-            observed = observed * sample_weight[:, None]
-            values = values * sample_weight[:, None]
+        if sample_count is not None:
+            observed = observed * sample_count[:, None]
+            values = values * sample_count[:, None]
         counts = observed.sum(axis=0)
         fill = np.divide(values.sum(axis=0), counts, out=np.zeros(table.shape[1]), where=counts > 0)
         if method == "rank2gaussian":
@@ -139,8 +139,8 @@ class Normalizer:
                 unique, inverse, frequencies = np.unique(
                     table[present, index], return_inverse=True, return_counts=True
                 )
-                if sample_weight is not None:
-                    frequencies = np.bincount(inverse, weights=sample_weight[present])
+                if sample_count is not None:
+                    frequencies = np.bincount(inverse, weights=sample_count[present])
                 if unique.size:
                     scale = float(np.max(np.abs(unique)))
                     total = int(frequencies.sum())
@@ -155,28 +155,28 @@ class Normalizer:
             center = np.zeros(filled.shape[1], dtype=filled.dtype)
             spread = np.ones_like(center)
         else:
-            if sample_weight is None:
+            if sample_count is None:
                 center, spread = filled.mean(axis=0), filled.std(axis=0)
             else:
-                center, variance = weighted_mean_var(filled, sample_weight)
+                center, variance = weighted_mean_var(filled, sample_count)
                 spread = np.sqrt(variance)
             tolerance = np.finfo(filled.dtype).eps * np.maximum(np.abs(center), 1)
             spread = np.where(spread <= tolerance, 1.0, spread)
         scaled = (filled - center) / spread
         normalizer, quantile_scale = None, None
         if method == "power":
-            normalizer = PowerNormalizer.fit(scaled, sample_weight)
+            normalizer = PowerNormalizer.fit(scaled, sample_count)
         elif method == "robust":
-            normalizer = fit_robust(scaled, sample_weight)
+            normalizer = fit_robust(scaled, sample_count)
         elif method == "rank2gaussian":
-            normalizer = Rank2Gaussian.fit(scaled, sample_weight)
+            normalizer = Rank2Gaussian.fit(scaled, sample_count)
         elif method != "none":
             raise ValueError(f"Unknown internal normalization: {method}")
         normalized = scaled if normalizer is None else normalizer.transform(scaled)
         if method == "rank2gaussian":
-            quantile_scale = StandardScaler().fit(normalized, sample_weight=sample_weight)
+            quantile_scale = StandardScaler().fit(normalized, sample_weight=sample_count)
             normalized = quantile_scale.transform(normalized)
-        lower, upper = outlier_bounds(normalized, sample_weight)
+        lower, upper = outlier_bounds(normalized, sample_count)
         return cls(
             fill=fill,
             center=center,
@@ -199,14 +199,14 @@ class Normalizer:
         return np.where(missing, np.nan, values).astype(np.float32)
 
 
-def fit_robust(table, sample_weight=None):
+def fit_robust(table, sample_count=None):
     """Fit the same interpolated quartiles as RobustScaler on repeated rows."""
     normalizer = RobustScaler(unit_variance=True)
-    if sample_weight is None:
+    if sample_count is None:
         return normalizer.fit(table)
     normalizer.n_features_in_ = table.shape[1]
     quantiles = np.array([
-        frequency_quantile(column, sample_weight, [0.25, 0.5, 0.75]) for column in table.T
+        frequency_quantile(column, sample_count, [0.25, 0.5, 0.75]) for column in table.T
     ])
     normalizer.center_ = quantiles[:, 1]
     spread = quantiles[:, 2] - quantiles[:, 0]
@@ -215,14 +215,14 @@ def fit_robust(table, sample_weight=None):
     return normalizer
 
 
-def outlier_bounds(values, sample_weight=None):
+def outlier_bounds(values, sample_count=None):
     """Estimate four-sigma bounds after excluding preliminary extreme values.
 
     These thresholds are part of the fixed preprocessing policy. A second pass
     limits how much extreme training values can inflate the final bounds.
     """
-    if sample_weight is not None:
-        return weighted_outlier_bounds(values, sample_weight)
+    if sample_count is not None:
+        return weighted_outlier_bounds(values, sample_count)
     if np.isnan(values).any():
         lower, upper = np.zeros(values.shape[1]), np.zeros(values.shape[1])
         for index, column in enumerate(values.T):

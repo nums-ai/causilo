@@ -74,7 +74,7 @@ def test_public_counts_match_expanded_rows(kind, members, cache, retain):
     indices = np.repeat(np.arange(len(table)), weights)
     options = dict(n_estimators=members, device="cpu", use_kv_cache=cache, retain_preprocessing=retain)
     expanded = kind(**options).fit(table.iloc[indices], targets[indices])
-    weighted = kind(**options).fit(table, targets, sample_weight=weights)
+    weighted = kind(**options).fit(table, targets, sample_count=weights)
     np.testing.assert_allclose(predict(weighted, query), predict(expanded, query), atol=3e-5, rtol=3e-5)
     state = weighted._engine.state
     assert len(state.dataset.features) == np.count_nonzero(weights)
@@ -91,10 +91,10 @@ def test_omitted_and_unit_counts_preserve_original_path(kind, cache):
     model = kind(n_estimators=4, device="cpu", use_kv_cache=cache).fit(table, targets)
     expected = predict(model, query)
     parameters = model.get_params()
-    assert "sample_weight" not in parameters
+    assert "sample_count" not in parameters
     assert clone(model).get_params() == parameters
     assert model.__getstate__()["schema"] == STATE_SCHEMA
-    model.fit(table, targets, sample_weight=np.ones(len(table)))
+    model.fit(table, targets, sample_count=np.ones(len(table)))
     assert model._engine.state.dataset.frequencies is None
     np.testing.assert_array_equal(predict(model, query), expected)
 
@@ -186,7 +186,7 @@ def test_zero_count_rows_do_not_affect_schema_classes_or_validation():
 def test_invalid_counts_clear_previous_fit(counts):
     table, targets, _, query = data()
     model = CausiloClassifier(n_estimators=1, device="cpu").fit(table, targets)
-    with pytest.raises(ValueError, match="sample_weight|frequenc|count"):
+    with pytest.raises(ValueError, match="sample_count|frequenc|count"):
         model.fit(table, targets, counts)
     with pytest.raises(NotFittedError):
         model.predict(query)
@@ -228,10 +228,20 @@ def test_invalid_saved_counts_are_rejected_before_checkpoint_loading(corruption,
         CausiloClassifier().__setstate__(saved)
 
 
-def test_sklearn_pipeline_routes_optional_fit_counts():
-    table, targets, weights, query = data()
+@pytest.mark.parametrize("kind", [CausiloClassifier, CausiloRegressor])
+def test_sklearn_pipeline_routes_optional_fit_counts(kind):
+    task = "classification" if kind is CausiloClassifier else "regression"
+    table, targets, weights, query = data(task)
     with config_context(enable_metadata_routing=True):
-        estimator = CausiloClassifier(n_estimators=1, device="cpu").set_fit_request(sample_weight=True)
-        pipeline = Pipeline([("model", estimator)]).fit(table, targets, sample_weight=weights)
-    assert np.isfinite(pipeline.predict_proba(query)).all()
+        estimator = kind(n_estimators=1, device="cpu").set_fit_request(sample_count=True)
+        pipeline = Pipeline([("model", estimator)]).fit(table, targets, sample_count=weights)
+    result = pipeline.predict_proba(query) if kind is CausiloClassifier else pipeline.predict(query)
+    assert np.isfinite(result).all()
     np.testing.assert_array_equal(estimator._engine.state.dataset.frequencies, weights[weights > 0])
+
+
+@pytest.mark.parametrize("kind", [CausiloClassifier, CausiloRegressor])
+def test_importance_weight_keyword_is_not_accepted_as_counts(kind):
+    table, targets, counts, _ = data()
+    with pytest.raises(TypeError, match="sample_weight"):
+        kind(device="cpu").fit(table, targets, sample_weight=counts)

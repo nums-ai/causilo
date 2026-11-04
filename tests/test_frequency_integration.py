@@ -46,7 +46,7 @@ def test_weighted_members_use_packed_scheduler_and_match_expansion(
     options = dict(n_estimators=4, device="cpu", use_kv_cache=cache)
     expanded = kind(**options).fit(x[indices], y[indices])
     expected = probabilities(expanded, query)
-    weighted = kind(**options).fit(x, y, sample_weight=counts)
+    weighted = kind(**options).fit(x, y, sample_count=counts)
     packs = []
     original = batched._execute
 
@@ -121,14 +121,14 @@ def test_weighted_local_checkpoint_roundtrip_keeps_fitted_identity(
 def test_failed_weighted_refit_invalidates_single_and_batch_modes(model_loader, sample, kind):
     x, y, counts, query = sample
     estimator = kind(n_estimators=2, device="cpu").fit_batched({"first": (x, y), "second": (x[:, :4], y)})
-    with pytest.raises(ValueError, match="sample_weight|frequenc|count"):
-        estimator.fit(x, y, sample_weight=np.zeros_like(counts))
+    with pytest.raises(ValueError, match="sample_count|frequenc|count"):
+        estimator.fit(x, y, sample_count=np.zeros_like(counts))
     with pytest.raises(NotFittedError):
         estimator.predict(query)
     with pytest.raises(NotFittedError):
         estimator.predict_batched({"first": query})
     assert estimator._engine.state is None and estimator._engine.batch_states is None
     assert not hasattr(estimator, "n_features_in_batched_")
-    estimator.fit(x, y, sample_weight=counts)
+    estimator.fit(x, y, sample_count=counts)
     assert np.isfinite(probabilities(estimator, query)).all()
     assert estimator._engine.batch_states is None
