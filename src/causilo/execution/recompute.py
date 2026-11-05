@@ -164,10 +164,9 @@ class RecomputeRunner:
         arranged = features.transpose(1, 2)
         del features
         summaries = []
-        options = {} if weights is None else {"weights": weights}
         with stage_autocast(self.model.config.task, Stage.COLUMN, self.device):
             for index, layer in enumerate(component.layers):
-                keys = layer.prepare(arranged, **options)
+                keys = layer.prepare(arranged, weights=weights)
                 summaries.append(keys)
                 # The final broadcast would be discarded; replay it in row passes.
                 if index + 1 < len(component.layers):
@@ -192,8 +191,7 @@ class RecomputeRunner:
             stop = min(start + size, groups)
             selected = _select_columns(previous, slice(start, stop)) if previous is not None else None
             values = table[:, :count, start * config.group_size : stop * config.group_size]
-            options = {} if weights is None else {"weights": weights}
-            return self._summary_tile(values, targets, component, selected, trace, **options), stop
+            return self._summary_tile(values, targets, component, selected, trace, weights=weights), stop
 
         while start < groups:
             piece, stop = retry.run(compute_tile)
@@ -210,8 +208,7 @@ class RecomputeRunner:
         groups = math.ceil(table.shape[-1] / model.config.group_size)
         per_row = self.memory.row_workspace(groups)
         logger.info("Recompute encoder: first column summaries")
-        options = {} if weights is None else {"weights": weights}
-        first = self._column_summaries(table, targets, model.columns[0], None, None, **options)
+        first = self._column_summaries(table, targets, model.columns[0], None, None, weights=weights)
 
         def trace_rows(part, section):
             features = self._apply_columns(self._embed(part, targets, section), model.columns[0], first)
@@ -223,7 +220,7 @@ class RecomputeRunner:
             limit = self._limit(count, per_row, pending_bytes=self.memory.trace_bytes(count), kernel_limited=True)
             trace = self._map(table[:, :count], trace_rows, axis=1, limit=limit)
         logger.info("Recompute encoder: second column summaries")
-        second = self._column_summaries(table, targets, model.columns[1], first, trace, **options)
+        second = self._column_summaries(table, targets, model.columns[1], first, trace, weights=weights)
 
         def pool_rows(part, section):
             features = self._apply_columns(self._embed(part, targets, section), model.columns[0], first)
@@ -274,7 +271,6 @@ class RecomputeRunner:
 
     def _predict_rows(self, rows: Tensor, targets: Tensor, reduce_output, weights=None) -> Tensor:
         model, count = self.model, targets.shape[1]
-        options = {} if weights is None else {"weights": weights}
         limit = self._limit(rows.shape[1], self.memory.prediction_workspace(count, final=False))
 
         def add_targets(part, section):
@@ -294,7 +290,7 @@ class RecomputeRunner:
                 )
 
                 def query(part, _):
-                    result = layer.query(part, keys, **options)
+                    result = layer.query(part, keys, weights=weights)
                     return reduce_output(model.head(result)) if final else result
 
                 rows = self._map(queries, query, axis=1, limit=limit, inplace=not final)

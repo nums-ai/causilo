@@ -60,17 +60,16 @@ class ModelRunner:
         arranged = features.transpose(1, 2)
         # (B, G, R, D): B and G can be partitioned independently, R cannot.
         workload = Workload(Stage.COLUMN, arranged.shape[-2], arranged.shape[-1], count)
-        options = {} if weights is None else {"weights": weights}
         with stage_autocast(self.model.config.task, Stage.COLUMN, features.device):
             if training_lengths is None:
                 result = self.chunks.run(
-                    lambda part: component(part, context_rows=count, **options), arranged, workload
+                    lambda part: component(part, context_rows=count, weights=weights), arranged, workload
                 )
             else:
                 lengths = training_lengths[:, None].expand(arranged.shape[:2]).reshape(-1)
                 result = self.chunks.run_indexed(
                     lambda part, section: component(
-                        part, context_rows=count, key_lengths=lengths[section], **options
+                        part, context_rows=count, key_lengths=lengths[section], weights=weights
                     ),
                     arranged, workload,
                 )
@@ -116,12 +115,11 @@ class ModelRunner:
         padding must be numeric zero, preserving partial final groups.
         """
         model, count = self.model, targets.shape[1]
-        options = {} if weights is None else {"weights": weights}
         groups = self._group_lengths(feature_counts)
         features = self._embed(table, targets)
-        features = self._column(model.columns[0], features, count, training_lengths, **options)
+        features = self._column(model.columns[0], features, count, training_lengths, weights=weights)
         features = self._row(model.row, features, Stage.ROW, groups)
-        features = self._column(model.columns[1], features, count, training_lengths, **options)
+        features = self._column(model.columns[1], features, count, training_lengths, weights=weights)
         rows = self._row(model.pool, features, Stage.POOL, groups)
         del features
         with stage_autocast(model.config.task, Stage.PREDICTION, rows.device):
@@ -135,12 +133,12 @@ class ModelRunner:
             )
             if training_lengths is None:
                 predicted = self.chunks.run(
-                    lambda part: model.prediction(part, context_rows=count, **options), rows, workload
+                    lambda part: model.prediction(part, context_rows=count, weights=weights), rows, workload
                 )
             else:
                 predicted = self.chunks.run_indexed(
                     lambda part, section: model.prediction(
-                        part, context_rows=count, key_lengths=training_lengths[section], **options
+                        part, context_rows=count, key_lengths=training_lengths[section], weights=weights
                     ), rows, workload,
                 )
         return model.head(predicted)
@@ -160,22 +158,21 @@ class ModelRunner:
         a time (B=1). Intermediate activations are released after their last use.
         """
         model = self.model
-        options = {} if weights is None else {"weights": weights}
         features = self._embed(table, targets)
         with stage_autocast(model.config.task, Stage.COLUMN, table.device):
-            first = self.cache_runner.build_column(model.columns[0], features.transpose(1, 2), **options)
+            first = self.cache_runner.build_column(model.columns[0], features.transpose(1, 2), weights=weights)
         first_state = first.cache
         features = self._row(model.row, first.rows.transpose(1, 2), Stage.ROW)
         del first
         with stage_autocast(model.config.task, Stage.COLUMN, table.device):
             context_input = features.float() if model.config.task == "regression" else features
-            second = self.cache_runner.build_column(model.columns[1], context_input.transpose(1, 2), **options)
+            second = self.cache_runner.build_column(model.columns[1], context_input.transpose(1, 2), weights=weights)
         second_state = second.cache
         rows = self._row(model.pool, second.rows.transpose(1, 2), Stage.POOL)
         del second, features, context_input
         with stage_autocast(model.config.task, Stage.PREDICTION, table.device):
             rows = inject_targets(rows, model.row_target(targets))
-            return ModelCache((first_state, second_state), model.prediction.build_context(rows, **options))
+            return ModelCache((first_state, second_state), model.prediction.build_context(rows, weights=weights))
 
     def predict_cached(
         self, table: Tensor, state: ModelCache, *, weights: FrequencyWeights | None = None,
@@ -188,7 +185,6 @@ class ModelRunner:
         prediction keys are excluded using training_lengths at every layer.
         """
         model = self.model
-        options = {} if weights is None else {"weights": weights}
         groups = self._group_lengths(feature_counts)
         features = self._embed(table)
         with stage_autocast(model.config.task, Stage.COLUMN, table.device):
@@ -205,6 +201,6 @@ class ModelRunner:
         del features, context_input
         with stage_autocast(model.config.task, Stage.PREDICTION, table.device):
             prediction = self.cache_runner.query(
-                model.prediction, rows, state.prediction, Stage.PREDICTION, key_lengths=training_lengths, **options
+                model.prediction, rows, state.prediction, Stage.PREDICTION, key_lengths=training_lengths, weights=weights
             )
         return model.head(prediction)

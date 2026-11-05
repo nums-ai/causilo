@@ -237,11 +237,11 @@ def test_column_summary_oom_retries_group_without_partial_state(small_model, mon
     original = model.columns[0].layers[0].prepare
     widths = []
 
-    def fail_groups(value):
+    def fail_groups(value, *, weights):
         widths.append(value.shape[1])
         if value.shape[1] > 1:
             raise torch.cuda.OutOfMemoryError("injected column workspace failure")
-        return original(value)
+        return original(value, weights=weights)
 
     monkeypatch.setattr(model.columns[0].layers[0], "prepare", fail_groups)
     with torch.inference_mode():
@@ -308,12 +308,12 @@ def test_prediction_oom_never_reapplies_completed_row_updates(small_model, monke
     original = layer.query
     calls = []
 
-    def fail_second_tile(value, context):
+    def fail_second_tile(value, context, *, weights):
         calls.append(value.shape[1])
         assert context.key.shape[-2] == targets.shape[1]
         if len(calls) == 2:
             raise torch.cuda.OutOfMemoryError("injected prediction failure")
-        return original(value, context)
+        return original(value, context, weights=weights)
 
     monkeypatch.setattr(layer, "query", fail_second_tile)
     with torch.inference_mode():
