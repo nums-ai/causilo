@@ -103,8 +103,8 @@ class ModelRunner:
             return features
 
     def predict(
-        self, table: Tensor, targets: Tensor, frequencies: Tensor | FrequencyWeights | None = None,
-        *, training_lengths: Tensor | None = None,
+        self, table: Tensor, targets: Tensor, *, weights: FrequencyWeights | None = None,
+        training_lengths: Tensor | None = None,
         feature_counts: Tensor | None = None,
     ) -> Tensor:
         """Return raw (B, Q, outputs) scores from table (B, T+Q, features).
@@ -116,7 +116,6 @@ class ModelRunner:
         padding must be numeric zero, preserving partial final groups.
         """
         model, count = self.model, targets.shape[1]
-        weights = FrequencyWeights.resolve(frequencies, table.device)
         options = {} if weights is None else {"weights": weights}
         groups = self._group_lengths(feature_counts)
         features = self._embed(table, targets)
@@ -153,7 +152,7 @@ class ModelRunner:
         return (feature_counts + size - 1) // size
 
     def build_cache(
-        self, table: Tensor, targets: Tensor, frequencies: Tensor | FrequencyWeights | None = None
+        self, table: Tensor, targets: Tensor, *, weights: FrequencyWeights | None = None
     ) -> ModelCache:
         """Process training rows once and retain each layer's reusable K/V tensors.
 
@@ -161,7 +160,6 @@ class ModelRunner:
         a time (B=1). Intermediate activations are released after their last use.
         """
         model = self.model
-        weights = FrequencyWeights.resolve(frequencies, table.device)
         options = {} if weights is None else {"weights": weights}
         features = self._embed(table, targets)
         with stage_autocast(model.config.task, Stage.COLUMN, table.device):
@@ -180,8 +178,8 @@ class ModelRunner:
             return ModelCache((first_state, second_state), model.prediction.build_context(rows, **options))
 
     def predict_cached(
-        self, table: Tensor, state: ModelCache, frequencies: Tensor | FrequencyWeights | None = None,
-        *, training_lengths: Tensor | None = None,
+        self, table: Tensor, state: ModelCache, *, weights: FrequencyWeights | None = None,
+        training_lengths: Tensor | None = None,
         feature_counts: Tensor | None = None,
     ) -> Tensor:
         """Return (B, Q, outputs) using aligned caches and optional per-item lengths.
@@ -190,7 +188,6 @@ class ModelRunner:
         prediction keys are excluded using training_lengths at every layer.
         """
         model = self.model
-        weights = FrequencyWeights.resolve(frequencies, table.device)
         options = {} if weights is None else {"weights": weights}
         groups = self._group_lengths(feature_counts)
         features = self._embed(table)

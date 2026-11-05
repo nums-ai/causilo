@@ -178,9 +178,9 @@ def test_ensemble_and_query_partition_preserve_predictions(estimator_type, monke
     original = ModelRunner.predict
     chunks = []
 
-    def observed(runner, features, targets):
+    def observed(runner, features, targets, **kwargs):
         chunks.append(features.shape[1] - targets.shape[1])
-        return original(runner, features, targets)
+        return original(runner, features, targets, **kwargs)
 
     monkeypatch.setattr(ModelRunner, "predict", observed)
     np.testing.assert_allclose(predict(table[:7]), expected, atol=2e-4, rtol=2e-4)
@@ -195,11 +195,11 @@ def test_prediction_oom_reselects_ensemble_and_preserves_result(monkeypatch):
     original = ModelRunner.predict
     attempts = []
 
-    def fail_once(flow, features, targets):
+    def fail_once(flow, features, targets, **kwargs):
         attempts.append(len(features))
         if len(attempts) == 1:
             raise torch.cuda.OutOfMemoryError("Simulated allocation failure")
-        return original(flow, features, targets)
+        return original(flow, features, targets, **kwargs)
 
     monkeypatch.setattr(ModelRunner, "predict", fail_once)
     np.testing.assert_allclose(model.predict(table[:3]), expected, atol=2e-4, rtol=2e-4)
@@ -289,11 +289,11 @@ def test_cached_query_oom_preserves_all_rows(monkeypatch):
     original = ModelRunner.predict_cached
     attempts = []
 
-    def fail_once(flow, rows, context):
+    def fail_once(flow, rows, context, **kwargs):
         attempts.append(rows.shape[1])
         if len(attempts) == 1:
             raise torch.cuda.OutOfMemoryError("Simulated cached query allocation failure")
-        return original(flow, rows, context)
+        return original(flow, rows, context, **kwargs)
 
     monkeypatch.setattr(ModelRunner, "predict_cached", fail_once)
     np.testing.assert_allclose(model.predict(table[:9]), expected, atol=2e-4, rtol=2e-4)
@@ -307,7 +307,7 @@ def test_failed_cache_refit_does_not_expose_previous_fit(estimator_type, monkeyp
     model = estimator_type(device="cpu", n_estimators=1, use_kv_cache=True)
     model.fit(values, np.arange(18) % 3)
 
-    def insufficient_memory(*args):
+    def insufficient_memory(*args, **kwargs):
         raise torch.cuda.OutOfMemoryError("Resident cache cannot fit")
 
     monkeypatch.setattr(ModelRunner, "build_cache", insufficient_memory)

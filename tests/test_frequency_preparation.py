@@ -82,7 +82,7 @@ def test_one_preparation_per_fit_or_predict_across_members_chunks_and_codes(
     executions = []
 
     def execute(self, *args, **kwargs):
-        weights = kwargs["frequencies"]
+        weights = kwargs["weights"]
         assert isinstance(weights, FrequencyWeights)
         assert weights.count == counts.sum()
         executions.append(id(weights))
@@ -115,30 +115,45 @@ def test_unweighted_execution_does_not_prepare_metadata(data_and_model, monkeypa
     assert calls == []
 
 
-@pytest.mark.parametrize("cache", [False, True])
-def test_standalone_member_prediction_prepares_once(data_and_model, monkeypatch, cache):
+@pytest.mark.parametrize("mode", ["direct", "cached", "recompute"])
+@pytest.mark.parametrize("weighted", [False, True])
+def test_member_prediction_requires_and_reuses_supplied_weights(data_and_model, monkeypatch, mode, weighted):
     table, counts = data_and_model
-    fitted = CausiloClassifier(n_estimators=4, device="cpu", use_kv_cache=cache).fit(
-        table, np.arange(len(table)) % 3, counts,
+    fitted = CausiloClassifier(n_estimators=4, device="cpu", use_kv_cache=mode == "cached").fit(
+        table, np.arange(len(table)) % 3, counts if weighted else None,
     )
     engine = fitted._engine
     state = engine.state
     transformed = state.dataset.query_tables(table[:3])
     calls = track_preparation(monkeypatch)
+    weights = FrequencyWeights.prepare(torch.from_numpy(counts), engine.device) if weighted else None
+    runner = RecomputeRunner if mode == "recompute" else ModelRunner
+    method = "predict_cached" if mode == "cached" else "predict"
+    original = getattr(runner, method)
+    executions = []
+
+    def execute(self, *args, **kwargs):
+        assert kwargs["weights"] is weights
+        executions.append(True)
+        return original(self, *args, **kwargs)
+
+    monkeypatch.setattr(runner, method, execute)
     with torch.inference_mode():
-        if cache:
+        if mode == "cached":
             member, context = next(iter(state.cached_members()))
-            result = predict_cached(
-                engine.model, state.dataset, transformed, member, context, engine.device, lambda x: x,
-            )
+            helper = predict_cached
+            args = (engine.model, state.dataset, transformed, member, context, engine.device, lambda x: x)
         else:
             member = next(iter(state.dataset.members_by_normalization()))
-            monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(1))
-            result = predict_direct(
-                engine.model, state.dataset, transformed, member, engine.device, lambda x: x,
-            )
+            monkeypatch.setattr(BatchPlanner, "choose", lambda *args: BatchPlan(1, mode=mode))
+            helper = predict_direct
+            args = (engine.model, state.dataset, transformed, member, engine.device, lambda x: x)
+        with pytest.raises(TypeError, match="weights"):
+            helper(*args)
+        result = helper(*args, weights=weights)
     assert result.shape[0] == 3 and torch.isfinite(result).all()
-    assert len(calls) == 1 and calls[0]() is None
+    assert executions
+    assert len(calls) == int(weighted), "Member helpers must not prepare metadata"
 
 
 @pytest.mark.parametrize("cache", [False, True])
@@ -154,7 +169,7 @@ def test_prediction_retry_reuses_prepared_metadata(data_and_model, monkeypatch, 
     executions = []
 
     def fail_once(self, *args, **kwargs):
-        executions.append(id(kwargs["frequencies"]))
+        executions.append(id(kwargs["weights"]))
         if len(executions) == 1:
             raise torch.cuda.OutOfMemoryError("Injected frequency metadata retry")
         return original(self, *args, **kwargs)

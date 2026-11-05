@@ -41,13 +41,10 @@ def predict_cached(
     context: ModelCache,
     device: torch.device,
     reduce_output: Callable[[torch.Tensor], torch.Tensor],
-    frequencies: FrequencyWeights | None = None,
+    *, weights: FrequencyWeights | None,
 ) -> torch.Tensor:
     """Return one cached member's CPU outputs, retaining completed query chunks."""
     runner = ModelRunner(model)
-    if frequencies is None and fitted.frequencies is not None:
-        frequencies = FrequencyWeights.prepare(torch.from_numpy(fitted.frequencies), device)
-    options = {} if frequencies is None else {"frequencies": frequencies}
     queries = transformed[member.normalization][:, member.feature_order]
     pieces = []
     offset = 0
@@ -76,7 +73,7 @@ def predict_cached(
                     device=device,
                     dtype=torch.float32,
                 ).unsqueeze(0)
-                result = reduce_output(runner.predict_cached(table, context, **options))[0].cpu()
+                result = reduce_output(runner.predict_cached(table, context, weights=weights))[0].cpu()
                 pieces.append(result)
                 completed = True
             except RuntimeError as error:

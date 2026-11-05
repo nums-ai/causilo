@@ -149,14 +149,13 @@ class Engine:
         caches = None
         code_caches = None
         if use_kv_cache:
-            frequencies = self._frequency_weights(prepared)
-            options = {} if frequencies is None else {"frequencies": frequencies}
+            weights = self._frequency_weights(prepared)
             runner = ModelRunner(self.model)
             with torch.inference_mode():
                 if codec is None:
-                    caches = self._build_caches(runner, prepared, **options)
+                    caches = self._build_caches(runner, prepared, weights=weights)
                 else:
-                    code_caches = tuple(self._build_caches(runner, dataset, **options) for dataset in code_datasets)
+                    code_caches = tuple(self._build_caches(runner, dataset, weights=weights) for dataset in code_datasets)
         return FitState(
             dataset=prepared,
             caches=caches,
@@ -172,16 +171,13 @@ class Engine:
         return FrequencyWeights.prepare(torch.from_numpy(fitted.frequencies), self.device)
 
     def _build_caches(
-        self, runner: ModelRunner, fitted: PreparedDataset, frequencies: FrequencyWeights | None = None
+        self, runner: ModelRunner, fitted: PreparedDataset, *, weights: FrequencyWeights | None
     ) -> tuple[ModelCache, ...]:
         collected = []
-        if frequencies is None:
-            frequencies = self._frequency_weights(fitted)
-        options = {} if frequencies is None else {"frequencies": frequencies}
         for member in fitted.members_by_normalization():
             features = fitted.training_table(member.normalization)[:, member.feature_order]
             collected.append(
-                runner.build_cache(self._tensor(features), self._tensor(fitted.targets_for(member)), **options)
+                runner.build_cache(self._tensor(features), self._tensor(fitted.targets_for(member)), weights=weights)
             )
         return tuple(collected)
 

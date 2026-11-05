@@ -142,7 +142,7 @@ def predict_direct(
     member: EnsembleMember,
     device: torch.device,
     reduce_output: Callable[[torch.Tensor], torch.Tensor],
-    frequencies: FrequencyWeights | None = None,
+    *, weights: FrequencyWeights | None,
 ) -> torch.Tensor:
     """Return one member's CPU outputs, retrying without publishing partial rows."""
     queries = transformed[member.normalization]
@@ -150,9 +150,6 @@ def predict_direct(
     footprint = BatchPlanner(model.config, len(fitted.features), fitted.features.shape[1])
     budget = execution_budget(device)
     runner = ModelRunner(model)
-    if frequencies is None and fitted.frequencies is not None:
-        frequencies = FrequencyWeights.prepare(torch.from_numpy(fitted.frequencies), device)
-    options = {} if frequencies is None else {"frequencies": frequencies}
 
     def feature_batch(section):
         training = fitted.training_table(member.normalization)
@@ -164,7 +161,7 @@ def predict_direct(
         plan = footprint.choose(query_count, budget, device)
         if plan.mode == "recompute":
             return RecomputeRunner(model, device).predict(
-                torch.from_numpy(feature_batch(slice(None))), torch.from_numpy(targets), reduce_output, **options
+                torch.from_numpy(feature_batch(slice(None))), torch.from_numpy(targets), reduce_output, weights=weights
             )[0]
         pieces = []
         tensor = result = target_tensor = None
@@ -172,7 +169,7 @@ def predict_direct(
             target_tensor = torch.as_tensor(targets, device=device)
             for offset in range(0, query_count, plan.queries):
                 tensor = torch.as_tensor(feature_batch(slice(offset, offset + plan.queries)), device=device)
-                result = runner.predict(tensor, target_tensor, **options)
+                result = runner.predict(tensor, target_tensor, weights=weights)
                 pieces.append(reduce_output(result)[0].cpu())
                 tensor = result = None
             return torch.cat(pieces, dim=0)

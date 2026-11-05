@@ -125,9 +125,9 @@ def test_public_predictions_keep_all_ensemble_members_when_recomputed(task, devi
         original = RecomputeRunner.predict
         calls = []
 
-        def observed(runner, *args):
+        def observed(runner, *args, **kwargs):
             calls.append(1)
-            return original(runner, *args)
+            return original(runner, *args, **kwargs)
 
         monkeypatch.setattr(RecomputeRunner, "predict", observed)
         bound_tiles(monkeypatch, 7)
@@ -513,12 +513,12 @@ def test_direct_oom_replans_member_into_recompute(small_model, monkeypatch):
     monkeypatch.setattr(direct, "execution_budget", lambda _: budget)
     member = fitted.members[0]
     with torch.inference_mode():
-        expected = predict_direct(model, fitted, transformed, member, device, lambda value: value)
+        expected = predict_direct(model, fitted, transformed, member, device, lambda value: value, weights=None)
     original_choose = BatchPlanner.choose
     direct_calls = []
     modes = []
 
-    def fail_direct(runner, *args):
+    def fail_direct(runner, *args, **kwargs):
         direct_calls.append(True)
         raise torch.cuda.OutOfMemoryError("injected direct failure")
 
@@ -530,7 +530,7 @@ def test_direct_oom_replans_member_into_recompute(small_model, monkeypatch):
     monkeypatch.setattr(ModelRunner, "predict", fail_direct)
     monkeypatch.setattr(BatchPlanner, "choose", record_plan)
     with torch.inference_mode():
-        actual = predict_direct(model, fitted, transformed, member, device, lambda value: value)
+        actual = predict_direct(model, fitted, transformed, member, device, lambda value: value, weights=None)
 
     assert modes == ["direct", "recompute"]
     assert len(direct_calls) == 1

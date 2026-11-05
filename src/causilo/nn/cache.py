@@ -10,6 +10,8 @@ from torch import Tensor
 class FrequencyWeights:
     """Row multiplicities prepared once per execution, shared by every attention layer.
 
+    Fit/prediction orchestration prepares this object on the execution device;
+    runners reuse it across members, chunks and retries without converting counts.
     The additive bias broadcasts across members, feature groups, heads and
     queries. Compute its logarithm in FP32 before any lower-precision cast so
     large counts cannot overflow FP16. This metadata is not part of K/V caches.
@@ -17,13 +19,6 @@ class FrequencyWeights:
 
     log_bias: Tensor
     count: int
-
-    @classmethod
-    def resolve(cls, frequencies, device: torch.device) -> "FrequencyWeights | None":
-        """Reuse prepared metadata, while accepting raw counts at runner entry points."""
-        if frequencies is None or isinstance(frequencies, cls):
-            return frequencies
-        return cls.prepare(frequencies, device)
 
     @classmethod
     def prepare(cls, frequencies: Tensor, device: torch.device) -> "FrequencyWeights":

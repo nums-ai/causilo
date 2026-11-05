@@ -50,32 +50,35 @@ def inputs(members=1):
 @pytest.mark.parametrize("cached", [False, True])
 def test_weighted_network_matches_expanded_context(model, members, cached):
     table, targets, frequencies, expanded, expanded_targets = inputs(members)
+    weights = FrequencyWeights.prepare(frequencies, table.device)
     runner = ModelRunner(model)
     with torch.inference_mode():
         expected = runner.predict(expanded, expanded_targets)
         if cached:
-            state = runner.build_cache(table[:, :6], targets, frequencies=frequencies)
-            actual = runner.predict_cached(table[:, 6:], state, frequencies=frequencies)
+            state = runner.build_cache(table[:, :6], targets, weights=weights)
+            actual = runner.predict_cached(table[:, 6:], state, weights=weights)
             assert state.prediction.layers[0].key.shape[-2] == len(frequencies)
         else:
-            actual = runner.predict(table, targets, frequencies=frequencies)
+            actual = runner.predict(table, targets, weights=weights)
     torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
 
 
 @pytest.mark.parametrize("tile", [1, 4, 50])
 def test_weighted_recompute_matches_expanded_context(model, monkeypatch, tile):
     table, targets, frequencies, expanded, expanded_targets = inputs()
+    weights = FrequencyWeights.prepare(frequencies, table.device)
     monkeypatch.setattr(RecomputeRunner, "_limit", lambda self, items, *a, **kw: min(items, tile))
     with torch.inference_mode():
         expected = ModelRunner(model).predict(expanded, expanded_targets)
         actual = RecomputeRunner(model, torch.device("cpu")).predict(
-            table, targets, frequencies=frequencies,
+            table, targets, weights=weights,
         )
     torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
 
 
 def test_weighted_column_summary_retry_keeps_frequencies(model, monkeypatch):
     table, targets, frequencies, expanded, expanded_targets = inputs()
+    weights = FrequencyWeights.prepare(frequencies, table.device)
     layer = model.columns[0].layers[0]
     original = layer.prepare
     attempts = []
@@ -91,7 +94,7 @@ def test_weighted_column_summary_retry_keeps_frequencies(model, monkeypatch):
         expected = ModelRunner(model).predict(expanded, expanded_targets)
         monkeypatch.setattr(layer, "prepare", fail_large_group)
         actual = RecomputeRunner(model, torch.device("cpu")).predict(
-            table, targets, frequencies=frequencies,
+            table, targets, weights=weights,
         )
     assert attempts[0] > 1 and attempts[-1] == 1
     torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
@@ -137,13 +140,14 @@ def test_frequency_totals_and_padding_lengths_have_separate_roles():
 
 def test_weighted_attention_does_not_mutate_model_or_unweighted_execution(model):
     table, targets, frequencies, _, _ = inputs()
+    weights = FrequencyWeights.prepare(frequencies, table.device)
     runner = ModelRunner(model)
     before = {key: value.clone() for key, value in model.state_dict().items()}
     with torch.inference_mode():
         expected = runner.predict(table, targets)
-        runner.predict(table, targets, frequencies=frequencies)
-        state = runner.build_cache(table[:, :6], targets, frequencies=frequencies)
-        runner.predict_cached(table[:, 6:], state, frequencies=frequencies)
+        runner.predict(table, targets, weights=weights)
+        state = runner.build_cache(table[:, :6], targets, weights=weights)
+        runner.predict_cached(table[:, 6:], state, weights=weights)
         actual = runner.predict(table, targets)
     torch.testing.assert_close(actual, expected, atol=0, rtol=0)
     for key, value in model.state_dict().items():
@@ -157,14 +161,15 @@ def test_accelerator_weighted_direct_cache_and_recompute(model, monkeypatch, dev
         pytest.skip(f"{device_name.upper()} frequency-weighted attention")
     table, targets, frequencies, expanded, expanded_targets = inputs()
     device = torch.device(device_name)
+    weights = FrequencyWeights.prepare(frequencies, device)
     runner = ModelRunner(model.to(device))
     monkeypatch.setattr(RecomputeRunner, "_limit", lambda self, items, *a, **kw: min(items, 3))
     with torch.inference_mode():
         expected = runner.predict(expanded.to(device), expanded_targets.to(device))
-        actual = runner.predict(table.to(device), targets.to(device), frequencies=frequencies.to(device))
-        state = runner.build_cache(table[:, :6].to(device), targets.to(device), frequencies=frequencies)
-        cached = runner.predict_cached(table[:, 6:].to(device), state, frequencies=frequencies)
-        replayed = RecomputeRunner(model, device).predict(table, targets, frequencies=frequencies)
+        actual = runner.predict(table.to(device), targets.to(device), weights=weights)
+        state = runner.build_cache(table[:, :6].to(device), targets.to(device), weights=weights)
+        cached = runner.predict_cached(table[:, 6:].to(device), state, weights=weights)
+        replayed = RecomputeRunner(model, device).predict(table, targets, weights=weights)
     for result in (actual, cached, replayed.to(device)):
         torch.testing.assert_close(result, expected, atol=5e-3, rtol=5e-3)
 
@@ -172,6 +177,7 @@ def test_accelerator_weighted_direct_cache_and_recompute(model, monkeypatch, dev
 @pytest.mark.parametrize("cached", [False, True])
 def test_weighted_member_and_feature_partitioning(model, monkeypatch, cached):
     table, targets, frequencies, expanded, expanded_targets = inputs(4)
+    weights = FrequencyWeights.prepare(frequencies, table.device)
     runner = ModelRunner(model)
     original = ChunkPlan.choose
 
@@ -184,15 +190,16 @@ def test_weighted_member_and_feature_partitioning(model, monkeypatch, cached):
         expected = runner.predict(expanded, expanded_targets)
         monkeypatch.setattr(ChunkPlan, "choose", classmethod(small_partitions))
         if cached:
-            state = runner.build_cache(table[:, :6], targets, frequencies=frequencies)
-            actual = runner.predict_cached(table[:, 6:], state, frequencies=frequencies)
+            state = runner.build_cache(table[:, :6], targets, weights=weights)
+            actual = runner.predict_cached(table[:, 6:], state, weights=weights)
         else:
-            actual = runner.predict(table, targets, frequencies=frequencies)
+            actual = runner.predict(table, targets, weights=weights)
     torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)
 
 
 def test_weighted_cache_build_retry_keeps_frequencies(model, monkeypatch):
     table, targets, frequencies, expanded, expanded_targets = inputs()
+    weights = FrequencyWeights.prepare(frequencies, table.device)
     runner = ModelRunner(model)
     column = model.columns[0]
     original = column.build_context
@@ -208,7 +215,7 @@ def test_weighted_cache_build_retry_keeps_frequencies(model, monkeypatch):
     with torch.inference_mode():
         expected = runner.predict(expanded, expanded_targets)
         monkeypatch.setattr(column, "build_context", fail_large_batch)
-        state = runner.build_cache(table[:, :6], targets, frequencies=frequencies)
-        actual = runner.predict_cached(table[:, 6:], state, frequencies=frequencies)
+        state = runner.build_cache(table[:, :6], targets, weights=weights)
+        actual = runner.predict_cached(table[:, 6:], state, weights=weights)
     assert attempts[0] > 2 and attempts[-1] <= 2
     torch.testing.assert_close(actual, expected, atol=2e-5, rtol=2e-5)

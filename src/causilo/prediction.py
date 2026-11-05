@@ -46,7 +46,7 @@ def predict_contexts(model, states, queries, output_options, device):
                 for index, (member, cache) in enumerate(member_caches):
                     items.append(BatchItem(
                         key=(key, index), fitted=dataset, member=member, transformed=queries[key],
-                        cache=cache, frequencies=weights.get(key),
+                        cache=cache, weights=weights.get(key),
                         output_type=output_options[key][0],
                     ))
             predictions = []

@@ -154,7 +154,7 @@ def test_weighted_oom_retry_keeps_counts(cache, monkeypatch):
     attempts = []
 
     def fail_once(runner, *args, **kwargs):
-        attempts.append(kwargs["frequencies"])
+        attempts.append(kwargs["weights"])
         if len(attempts) == 1:
             raise torch.cuda.OutOfMemoryError("Simulated frequency prediction OOM")
         return original(runner, *args, **kwargs)

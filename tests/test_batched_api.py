@@ -246,7 +246,7 @@ def test_failed_cache_fit_never_publishes_partial_batch(small_checkpoints, monke
     build_cache = ModelRunner.build_cache
     calls = 0
 
-    def fail_second_table(runner, table, targets):
+    def fail_second_table(runner, table, targets, **kwargs):
         nonlocal calls
         calls += 1
         for method, query in ((model.predict, x[:1]), (model.predict_batched, {"a": x[:1]})):
@@ -254,7 +254,7 @@ def test_failed_cache_fit_never_publishes_partial_batch(small_checkpoints, monke
                 method(query)
         if calls == 3:
             raise RuntimeError("injected cache failure")
-        return build_cache(runner, table, targets)
+        return build_cache(runner, table, targets, **kwargs)
 
     monkeypatch.setattr(ModelRunner, "build_cache", fail_second_table)
     with pytest.raises(RuntimeError, match="injected cache failure"):

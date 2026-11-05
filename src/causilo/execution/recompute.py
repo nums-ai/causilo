@@ -303,7 +303,7 @@ class RecomputeRunner:
 
     def predict(
         self, table: Tensor, targets: Tensor, reduce_output=lambda value: value,
-        frequencies: Tensor | FrequencyWeights | None = None,
+        *, weights: FrequencyWeights | None = None,
     ) -> Tensor:
         """Return host predictions for one member without retaining a fitted K/V cache."""
         if table.device.type != "cpu" or targets.device.type != "cpu" or table.shape[0] != 1:
@@ -311,7 +311,5 @@ class RecomputeRunner:
         count = targets.shape[1]
         if count < 1 or table.shape[1] <= count:
             raise ValueError("Recomputation requires training and query rows")
-        weights = FrequencyWeights.resolve(frequencies, self.device)
-        options = {} if weights is None else {"weights": weights}
-        rows = self._encode(table, targets, **options)
-        return self._predict_rows(rows, targets, reduce_output, **options).cpu()
+        rows = self._encode(table, targets, weights=weights)
+        return self._predict_rows(rows, targets, reduce_output, weights=weights).cpu()
