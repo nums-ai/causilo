@@ -127,8 +127,7 @@ Both estimators accept optional `sample_count` in `fit`. Each entry is an
 **integer repetition count**: a row with count 30 represents 30 identical
 observations with the same features and target. Counts are not loss weights or
 arbitrary importance scores. Omitting them keeps the usual `fit(X, y)` behavior.
-Counts are supported by ordinary `fit`; `fit_batched` continues to accept
-`{table_id: (X, y)}` pairs without a count argument.
+`fit_batched` does not accept counts.
 
 For binomial data, represent each group by a success row and a failure row:
 
@@ -158,20 +157,14 @@ sum no larger than `2**53`. Integer-valued floats are accepted; fractional value
 are rejected. Zero-count rows are removed before fitting feature mappings,
 classes, or preprocessing. All-one counts use the ordinary unweighted path.
 
-Repetition counts are applied to preprocessing, context attention, and its
-sample-count scaling. Regression also uses them when scaling targets. Many-class
-classification, retained K/V caches, and memory-bounded recomputation use the
-same counts. Predictions agree with explicit row repetition within floating-point
-precision; execution shape and device can change rounding. Savings depend on
-how many repeated observations the compact rows represent.
+Counts apply to both preprocessing and prediction. Results can differ from
+explicit row repetition because of floating-point rounding. CUDA's default mixed
+precision can also change predicted labels near a decision boundary. Time and
+memory savings depend on the data, device, and cache settings.
 
-For rank normalization, missing-value means are computed from distinct observed
-values and their counts in both paths. This prevents tiny summation differences
-from changing tied ranks. Newly fitted models, including unweighted fits, can
-therefore produce different predictions in affected missing-value edge cases.
-Previously saved models retain their fitted filling values and ranks on restore.
+This change also fixes missing-value rank normalization. Newly fitted models,
+including unweighted fits, may give different predictions in affected cases.
+Previously saved models retain their fitted preprocessing.
 
-Counts are retained in saved fitted estimators. Weighted fits use a new saved-state
-schema so versions without frequency support reject them instead of silently
-ignoring the counts. Existing unweighted fitted states retain their schema and
-remain readable under the existing matching-version requirements.
+Saved estimators retain their counts. Restoring a fitted model requires matching
+versions; older versions without count support reject weighted saved models.

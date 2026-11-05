@@ -6,33 +6,15 @@ import torch
 from causilo.execution.chunks import ChunkPlan
 from causilo.execution.recompute import RecomputeRunner
 from causilo.execution.runner import ModelRunner
-from causilo.model import Model, ModelConfig
 from causilo.nn.cache import FrequencyWeights, KVPair
 from causilo.nn.layers.attention import Attention
 
-
-@pytest.fixture(autouse=True)
-def limited_threads():
-    previous = torch.get_num_threads()
-    torch.set_num_threads(2)
-    yield
-    torch.set_num_threads(previous)
+pytestmark = pytest.mark.usefixtures("batch_runtime")
 
 
 @pytest.fixture(params=["classification", "regression"])
-def model(request):
-    with torch.random.fork_rng():
-        torch.manual_seed(18)
-        result = Model(ModelConfig(
-            task=request.param, width=16, expansion=2, group_size=3, frequencies=4,
-            column_latents=5, column_heads=2, column_depths=(2, 2),
-            row_heads=2, row_latents=2, row_depths=(3, 2),
-            prediction_heads=2, prediction_depth=3, outputs=3,
-        ))
-        for name, parameter in result.named_parameters():
-            if "latents" in name or name.endswith("frequencies") or name.endswith("missing"):
-                torch.nn.init.normal_(parameter, std=0.1)
-    return result.eval()
+def model(request, make_batch_model):
+    return make_batch_model(request.param, outputs=3)
 
 
 def inputs(members=1):

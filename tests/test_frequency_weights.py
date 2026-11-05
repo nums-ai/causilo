@@ -8,7 +8,6 @@ import joblib
 import numpy as np
 import pandas as pd
 import pytest
-import torch
 from sklearn import config_context
 from sklearn.base import clone
 from sklearn.exceptions import NotFittedError
@@ -18,32 +17,17 @@ from causilo import CausiloClassifier, CausiloRegressor, checkpoints
 from causilo.execution import batched
 from causilo.execution.direct import BatchPlan, BatchPlanner
 from causilo.execution.runner import ModelRunner
-from causilo.model import Model, ModelConfig
 from causilo.serialization import FREQUENCY_STATE_SCHEMA, STATE_SCHEMA
 
 
 @pytest.fixture(autouse=True)
-def models(monkeypatch):
+def models(make_batch_model, monkeypatch):
     """Exercise real model execution with small deterministic checkpoint fixtures."""
-    previous = torch.get_num_threads()
-    torch.set_num_threads(2)
-    models = {}
-    with torch.random.fork_rng():
-        for task in ("classification", "regression"):
-            torch.manual_seed(48)
-            model = Model(ModelConfig(
-                task=task, width=16, expansion=2, group_size=3, frequencies=4,
-                column_latents=5, column_heads=2, column_depths=(2, 2),
-                row_heads=2, row_latents=2, row_depths=(3, 2),
-                prediction_heads=2, prediction_depth=3, outputs=3 if task == "classification" else 9,
-            ))
-            for name, parameter in model.named_parameters():
-                if "latents" in name or name.endswith("frequencies") or name.endswith("missing"):
-                    torch.nn.init.normal_(parameter, std=0.1)
-            models[task] = model.eval()
+    models = {
+        task: make_batch_model(task, outputs=3 if task == "classification" else 9)
+        for task in ("classification", "regression")
+    }
     monkeypatch.setattr(checkpoints, "load_pretrained_model", lambda task: copy.deepcopy(models[task]))
-    yield
-    torch.set_num_threads(previous)
 
 
 def data(task="classification"):
@@ -142,29 +126,6 @@ def test_weighted_partitioning_and_recompute(kind, mode, monkeypatch):
     monkeypatch.setattr(batched, "_fits_budget", lambda *args: False)
     monkeypatch.setattr(BatchPlanner, "choose", lambda *a: BatchPlan(2, mode=mode))
     np.testing.assert_allclose(predict(model, query), expected, atol=3e-5, rtol=3e-5)
-
-
-@pytest.mark.parametrize("cache", [False, True])
-def test_weighted_oom_retry_keeps_counts(cache, monkeypatch):
-    table, targets, weights, query = data()
-    model = CausiloClassifier(n_estimators=4, device="cpu", use_kv_cache=cache).fit(table, targets, weights)
-    expected = model.predict_proba(query)
-    method = "predict_cached" if cache else "predict"
-    original = getattr(ModelRunner, method)
-    attempts = []
-
-    def fail_once(runner, *args, **kwargs):
-        attempts.append(kwargs["weights"])
-        if len(attempts) == 1:
-            raise torch.cuda.OutOfMemoryError("Simulated frequency prediction OOM")
-        return original(runner, *args, **kwargs)
-
-    monkeypatch.setattr(ModelRunner, method, fail_once)
-    np.testing.assert_allclose(model.predict_proba(query), expected, atol=3e-5, rtol=3e-5)
-    assert len(attempts) > 1
-    assert all(values is attempts[0] for values in attempts[1:])
-    assert attempts[0].count == int(weights.sum())
-    torch.testing.assert_close(attempts[0].log_bias.flatten(), torch.tensor(weights[weights > 0]).float().log())
 
 
 def test_zero_count_rows_do_not_affect_schema_classes_or_validation():

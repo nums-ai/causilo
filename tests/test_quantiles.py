@@ -151,9 +151,9 @@ def test_pretrained_output_partitioning(cache, monkeypatch):
     original = getattr(ModelRunner, method_name)
     chunks = []
 
-    def observed(runner, features, context):
+    def observed(runner, features, context, **kwargs):
         chunks.append(features.shape[1] if cache else features.shape[1] - context.shape[1])
-        return original(runner, features, context)
+        return original(runner, features, context, **kwargs)
 
     monkeypatch.setattr(ModelRunner, method_name, observed)
     np.testing.assert_allclose(model.predict(table[:7], **options), expected, atol=2e-3, rtol=2e-4)

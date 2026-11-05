@@ -131,7 +131,7 @@ def test_failed_many_class_cache_fit_discards_context(monkeypatch):
     x = np.random.default_rng(12).normal(size=(44, 4))
     model = CausiloClassifier(n_estimators=1, device="cpu", use_kv_cache=True).fit(x, np.arange(44) % 3)
     monkeypatch.setattr(
-        ModelRunner, "build_cache", lambda *args: (_ for _ in ()).throw(RuntimeError("cache"))
+        ModelRunner, "build_cache", lambda *args, **kwargs: (_ for _ in ()).throw(RuntimeError("cache"))
     )
     with pytest.raises(RuntimeError, match="cache"):
         model.fit(x, np.arange(44) % 11)

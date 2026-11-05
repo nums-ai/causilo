@@ -13,32 +13,15 @@ from causilo.execution.cached import predict_cached
 from causilo.execution.direct import BatchPlan, BatchPlanner, predict_direct
 from causilo.execution.recompute import RecomputeRunner
 from causilo.execution.runner import ModelRunner
-from causilo.model import Model, ModelConfig
 from causilo.nn.cache import FrequencyWeights
 
 
 @pytest.fixture
-def data_and_model(monkeypatch):
-    previous = torch.get_num_threads()
-    torch.set_num_threads(2)
-    models = {}
-    with torch.random.fork_rng():
-        torch.manual_seed(93)
-        for task in ("classification", "regression"):
-            model = Model(ModelConfig(
-                task=task, width=16, expansion=2, group_size=3, frequencies=4,
-                column_latents=5, column_heads=2, column_depths=(2, 2),
-                row_heads=2, row_latents=2, row_depths=(3, 2),
-                prediction_heads=2, prediction_depth=3, outputs=3,
-            ))
-            for name, parameter in model.named_parameters():
-                if "latents" in name or name.endswith("frequencies") or name.endswith("missing"):
-                    torch.nn.init.normal_(parameter, std=0.1)
-            models[task] = model.eval()
+def data_and_model(make_batch_model, monkeypatch):
+    models = {task: make_batch_model(task, outputs=3) for task in ("classification", "regression")}
     monkeypatch.setattr(checkpoints, "load_pretrained_model", lambda task: copy.deepcopy(models[task]))
     table = np.random.default_rng(12).normal(size=(10, 5))
-    yield table, np.arange(1, 11)
-    torch.set_num_threads(previous)
+    return table, np.arange(1, 11)
 
 
 def track_preparation(monkeypatch):
@@ -159,6 +142,7 @@ def test_member_prediction_requires_and_reuses_supplied_weights(data_and_model, 
 @pytest.mark.parametrize("cache", [False, True])
 def test_prediction_retry_reuses_prepared_metadata(data_and_model, monkeypatch, cache):
     table, counts = data_and_model
+    counts[3] = 0
     fitted = CausiloClassifier(n_estimators=4, device="cpu", use_kv_cache=cache).fit(
         table, np.arange(len(table)) % 3, counts,
     )
@@ -169,7 +153,10 @@ def test_prediction_retry_reuses_prepared_metadata(data_and_model, monkeypatch, 
     executions = []
 
     def fail_once(self, *args, **kwargs):
-        executions.append(id(kwargs["weights"]))
+        weights = kwargs["weights"]
+        assert weights.count == int(counts.sum())
+        torch.testing.assert_close(weights.log_bias.flatten(), torch.tensor(counts[counts > 0]).float().log())
+        executions.append(id(weights))
         if len(executions) == 1:
             raise torch.cuda.OutOfMemoryError("Injected frequency metadata retry")
         return original(self, *args, **kwargs)
