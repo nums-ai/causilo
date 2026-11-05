@@ -11,7 +11,7 @@ import torch
 from ..data.dataset import PreparedDataset
 from ..data.ensemble import EnsembleMember
 from ..model import Model
-from ..nn.cache import BlockCache, KVPair
+from ..nn.cache import BlockCache, FrequencyWeights, KVPair
 from ..outputs import reduce_regression_output
 from .cached import predict_cached, query_memory
 from .direct import BatchPlanner, predict_direct
@@ -29,6 +29,7 @@ class BatchItem:
     transformed: dict[str, np.ndarray]
     cache: ModelCache | None = None
     output_type: str = "raw"
+    weights: FrequencyWeights | None = None
 
     @property
     def shape(self) -> tuple[int, int, int]:
@@ -148,9 +149,9 @@ def _execute(model, items, device):
     table = torch.as_tensor(tables, device=device)
     if cached:
         context = _pack_cache(items, features // model.config.group_size, training)
-        result = runner.predict_cached(table, context, **lengths)
+        result = runner.predict_cached(table, context, weights=items[0].weights, **lengths)
     else:
-        result = runner.predict(table, torch.as_tensor(targets, device=device), **lengths)
+        result = runner.predict(table, torch.as_tensor(targets, device=device), weights=items[0].weights, **lengths)
     # CPU logits are views into the full batch; give each member independent
     # storage so unfinished tables cannot keep completed tables' outputs alive.
     return [
@@ -166,10 +167,12 @@ def _singleton(model, item, device):
     def reduce_output(value):
         return _reduce(model, item, value)
     if item.cache is None:
-        result = predict_direct(model, item.fitted, item.transformed, item.member, device, reduce_output)
+        result = predict_direct(
+            model, item.fitted, item.transformed, item.member, device, reduce_output, weights=item.weights
+        )
     else:
         result = predict_cached(
-            model, item.fitted, item.transformed, item.member, item.cache, device, reduce_output
+            model, item.fitted, item.transformed, item.member, item.cache, device, reduce_output, weights=item.weights
         )
     yield item, result
 
@@ -208,5 +211,11 @@ def batched_predictions(model: Model, items: list[BatchItem], device: torch.devi
     Query tables must already be validated and contain at least one row.
     """
     with torch.inference_mode():
-        for _, group in groupby(items, key=lambda item: item.cache is not None):
+        # Weighted members share one context's frequency vector. Do not pack
+        # unrelated contexts under that shared bias; unweighted batching stays
+        # unchanged. The public batch-fit API continues to accept (X, y) pairs.
+        def group_key(item):
+            return item.cache is not None, id(item.fitted) if item.weights is not None else None
+
+        for _, group in groupby(items, key=group_key):
             yield from _run_group(model, list(group), device)

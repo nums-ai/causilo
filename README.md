@@ -41,6 +41,9 @@ by default and also supports median and quantile predictions. Targets must not b
 runnable [classification](examples/classification.py) and [regression](examples/regression.py)
 examples.
 
+For repeated observations, pass `sample_count` to `fit` instead of repeating rows.
+See [aggregated observations](docs/inference.md#aggregated-observations-and-repetition-counts) for an example and input rules.
+
 ## Benchmarks
 
 Evaluated using the official TabArena pipeline: 51 datasets, 51 Lite splits and 816 Full splits, using the default configuration with eight estimators and seed 42. System methods are excluded. Full plots show the top 16 model families by their best Elo, with default, tuned and ensembled variants.

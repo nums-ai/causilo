@@ -1,10 +1,19 @@
 """Training-fitted transforms with explicit missing masks and compressed outliers."""
 
+import math
 from dataclasses import dataclass
 
 import numpy as np
 from scipy.special import ndtri
 from sklearn.preprocessing import PowerTransformer, RobustScaler, StandardScaler
+
+from .frequency import (
+    frequency_quantile,
+    validate_frequencies,
+    weighted_mean_var,
+    weighted_outlier_bounds,
+    weighted_yeojohnson_lambda,
+)
 
 
 @dataclass
@@ -14,12 +23,22 @@ class Rank2Gaussian:
     knots: tuple[tuple[np.ndarray, np.ndarray], ...]
 
     @classmethod
-    def fit(cls, table):
+    def fit(cls, table, sample_count=None):
         """Store unique values and tie-aware probabilities per feature column."""
         knots = []
         for column in table.T:
-            values, counts = np.unique(column, return_counts=True)
-            probabilities = (np.cumsum(counts) - counts / 2) / len(column)
+            if sample_count is None:
+                values, counts = np.unique(column, return_counts=True)
+                total = len(column)
+            else:
+                values, inverse = np.unique(column, return_inverse=True)
+                counts = np.bincount(inverse, weights=sample_count)
+                total = sample_count.sum()
+            probabilities = (np.cumsum(counts) - counts / 2) / total
+            if sample_count is not None:
+                # Very large totals can round the highest mid-rank to 1.
+                # Keep Gaussian quantiles finite at the supported count limit.
+                probabilities = np.minimum(probabilities, np.nextafter(1.0, 0.0))
             knots.append((values, probabilities))
         return cls(tuple(knots))
 
@@ -46,11 +65,18 @@ class PowerNormalizer:
         return values
 
     @classmethod
-    def fit(cls, table):
-        power = PowerTransformer(standardize=False).fit(table)
+    def fit(cls, table, sample_count=None):
+        power = PowerTransformer(standardize=False)
+        if sample_count is None:
+            power.fit(table)
+        else:
+            power.n_features_in_ = table.shape[1]
+            power.lambdas_ = np.array([
+                weighted_yeojohnson_lambda(column, sample_count) for column in table.T
+            ])
         values = cls._power_values(power, table)
         with np.errstate(over="ignore", invalid="ignore", divide="ignore"):
-            scale = StandardScaler(copy=False).fit(values)
+            scale = StandardScaler(copy=False).fit(values, sample_weight=sample_count)
         return cls(power, scale)
 
     def transform(self, table):
@@ -80,36 +106,77 @@ class Normalizer:
     upper: np.ndarray
 
     @classmethod
-    def fit(cls, table: np.ndarray, method: str) -> "Normalizer":
-        """Fit filling, scaling, optional distribution transform, and tail bounds."""
+    def fit(cls, table: np.ndarray, method: str, sample_count=None) -> "Normalizer":
+        """Fit transforms using optional integer row multiplicities.
+
+        Zero-count rows are excluded; unit counts use the original unweighted
+        path. All statistics are computed without expanding repeated rows.
+        """
+        if sample_count is not None:
+            sample_count = validate_frequencies(sample_count, len(table))
+            present = sample_count > 0
+            table, sample_count = table[present], sample_count[present]
+            if np.all(sample_count == 1):
+                sample_count = None
         missing = np.isnan(table)
-        counts = (~missing).sum(axis=0)
-        fill = np.divide(
-            np.where(missing, 0, table).sum(axis=0), counts, out=np.zeros(table.shape[1]), where=counts > 0
-        )
+        observed = ~missing
+        values = np.where(missing, 0, table)
+        rank_missing = np.flatnonzero(missing.any(axis=0)) if method == "rank2gaussian" else []
+        # These columns use the grouped mean below; skip their ordinary sum,
+        # which may overflow even when the resulting mean is finite.
+        values[:, rank_missing] = 0
+        if sample_count is not None:
+            observed = observed * sample_count[:, None]
+            values = values * sample_count[:, None]
+        counts = observed.sum(axis=0)
+        fill = np.divide(values.sum(axis=0), counts, out=np.zeros(table.shape[1]), where=counts > 0)
+        if method == "rank2gaussian":
+            # Mean-filled entries participate in ranks. A one-ULP difference
+            # can split a tie, so use the same grouped sum for compact and
+            # expanded inputs, independent of row order and missing-row count.
+            for index in rank_missing:
+                present = ~missing[:, index]
+                unique, inverse, frequencies = np.unique(
+                    table[present, index], return_inverse=True, return_counts=True
+                )
+                if sample_count is not None:
+                    frequencies = np.bincount(inverse, weights=sample_count[present])
+                if unique.size:
+                    scale = float(np.max(np.abs(unique)))
+                    total = int(frequencies.sum())
+                    if scale:
+                        mean = math.fsum(
+                            (float(value) / scale) * (int(count) / total)
+                            for value, count in zip(unique, frequencies)
+                        )
+                        fill[index] = np.clip(mean, -1.0, 1.0) * scale
         filled = np.where(missing, fill, table)
         if method == "rank2gaussian":
             center = np.zeros(filled.shape[1], dtype=filled.dtype)
             spread = np.ones_like(center)
         else:
-            center, spread = filled.mean(axis=0), filled.std(axis=0)
+            if sample_count is None:
+                center, spread = filled.mean(axis=0), filled.std(axis=0)
+            else:
+                center, variance = weighted_mean_var(filled, sample_count)
+                spread = np.sqrt(variance)
             tolerance = np.finfo(filled.dtype).eps * np.maximum(np.abs(center), 1)
             spread = np.where(spread <= tolerance, 1.0, spread)
         scaled = (filled - center) / spread
         normalizer, quantile_scale = None, None
         if method == "power":
-            normalizer = PowerNormalizer.fit(scaled)
+            normalizer = PowerNormalizer.fit(scaled, sample_count)
         elif method == "robust":
-            normalizer = RobustScaler(unit_variance=True).fit(scaled)
+            normalizer = fit_robust(scaled, sample_count)
         elif method == "rank2gaussian":
-            normalizer = Rank2Gaussian.fit(scaled)
+            normalizer = Rank2Gaussian.fit(scaled, sample_count)
         elif method != "none":
             raise ValueError(f"Unknown internal normalization: {method}")
         normalized = scaled if normalizer is None else normalizer.transform(scaled)
         if method == "rank2gaussian":
-            quantile_scale = StandardScaler().fit(normalized)
+            quantile_scale = StandardScaler().fit(normalized, sample_weight=sample_count)
             normalized = quantile_scale.transform(normalized)
-        lower, upper = outlier_bounds(normalized)
+        lower, upper = outlier_bounds(normalized, sample_count)
         return cls(
             fill=fill,
             center=center,
@@ -132,12 +199,30 @@ class Normalizer:
         return np.where(missing, np.nan, values).astype(np.float32)
 
 
-def outlier_bounds(values):
+def fit_robust(table, sample_count=None):
+    """Fit the same interpolated quartiles as RobustScaler on repeated rows."""
+    normalizer = RobustScaler(unit_variance=True)
+    if sample_count is None:
+        return normalizer.fit(table)
+    normalizer.n_features_in_ = table.shape[1]
+    quantiles = np.array([
+        frequency_quantile(column, sample_count, [0.25, 0.5, 0.75]) for column in table.T
+    ])
+    normalizer.center_ = quantiles[:, 1]
+    spread = quantiles[:, 2] - quantiles[:, 0]
+    spread[spread < 10 * np.finfo(spread.dtype).eps] = 1.0
+    normalizer.scale_ = spread / (ndtri(0.75) - ndtri(0.25))
+    return normalizer
+
+
+def outlier_bounds(values, sample_count=None):
     """Estimate four-sigma bounds after excluding preliminary extreme values.
 
     These thresholds are part of the fixed preprocessing policy. A second pass
     limits how much extreme training values can inflate the final bounds.
     """
+    if sample_count is not None:
+        return weighted_outlier_bounds(values, sample_count)
     if np.isnan(values).any():
         lower, upper = np.zeros(values.shape[1]), np.zeros(values.shape[1])
         for index, column in enumerate(values.T):

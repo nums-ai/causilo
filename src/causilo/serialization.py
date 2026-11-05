@@ -8,6 +8,7 @@ from importlib.metadata import version
 import torch
 
 from . import checkpoints
+from .data.frequency import validate_frequencies
 from .ecoc import ECOCCodec
 from .engine import Engine, FitState
 from .execution.memory import Stage
@@ -15,6 +16,7 @@ from .execution.precision import stage_dtype
 from .model import ModelConfig
 
 STATE_SCHEMA = "causilo-fitted-1"
+FREQUENCY_STATE_SCHEMA = "causilo-fitted-2"
 BATCH_STATE_SCHEMA = "causilo-batched-fitted-1"
 
 
@@ -110,9 +112,13 @@ def export_estimator(estimator) -> dict:
         {key: compact_state(value) for key, value in engine.batch_states.items()}
         if batched else compact_state(state)
     )
+    schema = BATCH_STATE_SCHEMA if batched else STATE_SCHEMA
+    if not batched and state is not None and state.dataset.frequencies is not None:
+        # Older readers must not silently treat compressed rows as single observations.
+        schema = FREQUENCY_STATE_SCHEMA
     return {
         "version": __version__,
-        "schema": BATCH_STATE_SCHEMA if batched else STATE_SCHEMA,
+        "schema": schema,
         "dependencies": runtime_versions(),
         "revision": checkpoints.RELEASE_COMMIT,
         "checkpoint": engine.checkpoint.copy() if state is not None and engine.checkpoint else None,
@@ -129,12 +135,32 @@ def import_estimator(estimator, saved: dict) -> None:
     """Restore parameters and fitted context, loading weights but never rebuilding K/V."""
     from . import __version__
 
-    if saved["version"] != __version__ or saved["schema"] not in {STATE_SCHEMA, BATCH_STATE_SCHEMA}:
+    if saved["version"] != __version__ or saved["schema"] not in {STATE_SCHEMA, FREQUENCY_STATE_SCHEMA, BATCH_STATE_SCHEMA}:
         raise ValueError("Restore requires the same Causilo version and fitted-state schema")
     if saved.get("dependencies") != runtime_versions():
         raise ValueError("Restore requires matching Python and dependency versions")
     if saved["revision"] != checkpoints.RELEASE_COMMIT:
         raise ValueError("Saved state belongs to a different pretrained checkpoint")
+    state = saved["fitted"]
+    if saved["schema"] == BATCH_STATE_SCHEMA:
+        if not isinstance(state, dict) or not state or any(
+            not isinstance(key, str) or not key or not isinstance(value, FitState)
+            for key, value in state.items()
+        ):
+            raise ValueError("Saved batch must contain string IDs and fitted contexts")
+        contexts = state.values()
+    else:
+        contexts = (state,)
+    for context in contexts:
+        frequencies = None if context is None else context.dataset.frequencies
+        if saved["schema"] == FREQUENCY_STATE_SCHEMA:
+            if frequencies is None:
+                raise ValueError("Saved frequency-weighted state requires repetition counts")
+            frequencies = validate_frequencies(frequencies, len(context.dataset.features))
+            if (frequencies == 0).any():
+                raise ValueError("Saved frequency-weighted state cannot contain zero-count rows")
+        elif frequencies is not None:
+            raise ValueError("Saved repetition counts require the frequency-weighted state schema")
     from .estimators import invalidate_fit, publish_fitted_attributes
 
     invalidate_fit(estimator)
@@ -158,13 +184,7 @@ def import_estimator(estimator, saved: dict) -> None:
     if engine.model.config.record() != saved["model_config"]:
         raise ValueError("Saved cache does not match the model shape")
     if saved["schema"] == BATCH_STATE_SCHEMA:
-        states = saved["fitted"]
-        if not isinstance(states, dict) or not states or any(
-            not isinstance(key, str) or not key or not isinstance(state, FitState)
-            for key, state in states.items()
-        ):
-            raise ValueError("Saved batch must contain string IDs and fitted contexts")
-        engine.batch_states = {key: restore_state(state, engine) for key, state in states.items()}
+        engine.batch_states = {key: restore_state(value, engine) for key, value in state.items()}
     else:
         engine.state = restore_state(saved["fitted"], engine)
     estimator._engine = engine

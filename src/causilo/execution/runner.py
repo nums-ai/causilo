@@ -11,7 +11,7 @@ import torch
 from torch import Tensor
 
 from ..model import Model
-from ..nn.cache import BlockCache
+from ..nn.cache import BlockCache, FrequencyWeights
 from .chunks import CacheRunner, ChunkRunner
 from .memory import Stage, Workload
 from .precision import stage_autocast
@@ -51,7 +51,8 @@ class ModelRunner:
         self.cache_runner = CacheRunner()
 
     def _column(
-        self, component, features: Tensor, count: int, training_lengths: Tensor | None = None
+        self, component, features: Tensor, count: int, training_lengths: Tensor | None = None,
+        weights: FrequencyWeights | None = None,
     ) -> Tensor:
         """Attend over R for each feature group; preserve (B, R, G, D)."""
         if self.model.config.task == "regression":
@@ -61,11 +62,15 @@ class ModelRunner:
         workload = Workload(Stage.COLUMN, arranged.shape[-2], arranged.shape[-1], count)
         with stage_autocast(self.model.config.task, Stage.COLUMN, features.device):
             if training_lengths is None:
-                result = self.chunks.run(lambda part: component(part, context_rows=count), arranged, workload)
+                result = self.chunks.run(
+                    lambda part: component(part, context_rows=count, weights=weights), arranged, workload
+                )
             else:
                 lengths = training_lengths[:, None].expand(arranged.shape[:2]).reshape(-1)
                 result = self.chunks.run_indexed(
-                    lambda part, section: component(part, context_rows=count, key_lengths=lengths[section]),
+                    lambda part, section: component(
+                        part, context_rows=count, key_lengths=lengths[section], weights=weights
+                    ),
                     arranged, workload,
                 )
         return result.transpose(1, 2)
@@ -97,7 +102,8 @@ class ModelRunner:
             return features
 
     def predict(
-        self, table: Tensor, targets: Tensor, *, training_lengths: Tensor | None = None,
+        self, table: Tensor, targets: Tensor, *, weights: FrequencyWeights | None = None,
+        training_lengths: Tensor | None = None,
         feature_counts: Tensor | None = None,
     ) -> Tensor:
         """Return raw (B, Q, outputs) scores from table (B, T+Q, features).
@@ -111,9 +117,9 @@ class ModelRunner:
         model, count = self.model, targets.shape[1]
         groups = self._group_lengths(feature_counts)
         features = self._embed(table, targets)
-        features = self._column(model.columns[0], features, count, training_lengths)
+        features = self._column(model.columns[0], features, count, training_lengths, weights=weights)
         features = self._row(model.row, features, Stage.ROW, groups)
-        features = self._column(model.columns[1], features, count, training_lengths)
+        features = self._column(model.columns[1], features, count, training_lengths, weights=weights)
         rows = self._row(model.pool, features, Stage.POOL, groups)
         del features
         with stage_autocast(model.config.task, Stage.PREDICTION, rows.device):
@@ -127,12 +133,12 @@ class ModelRunner:
             )
             if training_lengths is None:
                 predicted = self.chunks.run(
-                    lambda part: model.prediction(part, context_rows=count), rows, workload
+                    lambda part: model.prediction(part, context_rows=count, weights=weights), rows, workload
                 )
             else:
                 predicted = self.chunks.run_indexed(
                     lambda part, section: model.prediction(
-                        part, context_rows=count, key_lengths=training_lengths[section]
+                        part, context_rows=count, key_lengths=training_lengths[section], weights=weights
                     ), rows, workload,
                 )
         return model.head(predicted)
@@ -143,7 +149,9 @@ class ModelRunner:
         size = self.model.config.group_size
         return (feature_counts + size - 1) // size
 
-    def build_cache(self, table: Tensor, targets: Tensor) -> ModelCache:
+    def build_cache(
+        self, table: Tensor, targets: Tensor, *, weights: FrequencyWeights | None = None
+    ) -> ModelCache:
         """Process training rows once and retain each layer's reusable K/V tensors.
 
         Inputs are (B, T, features) and (B, T); the engine builds one member at
@@ -152,22 +160,23 @@ class ModelRunner:
         model = self.model
         features = self._embed(table, targets)
         with stage_autocast(model.config.task, Stage.COLUMN, table.device):
-            first = self.cache_runner.build_column(model.columns[0], features.transpose(1, 2))
+            first = self.cache_runner.build_column(model.columns[0], features.transpose(1, 2), weights=weights)
         first_state = first.cache
         features = self._row(model.row, first.rows.transpose(1, 2), Stage.ROW)
         del first
         with stage_autocast(model.config.task, Stage.COLUMN, table.device):
             context_input = features.float() if model.config.task == "regression" else features
-            second = self.cache_runner.build_column(model.columns[1], context_input.transpose(1, 2))
+            second = self.cache_runner.build_column(model.columns[1], context_input.transpose(1, 2), weights=weights)
         second_state = second.cache
         rows = self._row(model.pool, second.rows.transpose(1, 2), Stage.POOL)
         del second, features, context_input
         with stage_autocast(model.config.task, Stage.PREDICTION, table.device):
             rows = inject_targets(rows, model.row_target(targets))
-            return ModelCache((first_state, second_state), model.prediction.build_context(rows))
+            return ModelCache((first_state, second_state), model.prediction.build_context(rows, weights=weights))
 
     def predict_cached(
-        self, table: Tensor, state: ModelCache, *, training_lengths: Tensor | None = None,
+        self, table: Tensor, state: ModelCache, *, weights: FrequencyWeights | None = None,
+        training_lengths: Tensor | None = None,
         feature_counts: Tensor | None = None,
     ) -> Tensor:
         """Return (B, Q, outputs) using aligned caches and optional per-item lengths.
@@ -192,6 +201,6 @@ class ModelRunner:
         del features, context_input
         with stage_autocast(model.config.task, Stage.PREDICTION, table.device):
             prediction = self.cache_runner.query(
-                model.prediction, rows, state.prediction, Stage.PREDICTION, key_lengths=training_lengths
+                model.prediction, rows, state.prediction, Stage.PREDICTION, key_lengths=training_lengths, weights=weights
             )
         return model.head(prediction)

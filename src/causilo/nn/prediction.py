@@ -4,7 +4,7 @@ import torch
 from torch import Tensor, nn
 from torch.nn import functional as F
 
-from .cache import BlockCache
+from .cache import BlockCache, FrequencyWeights
 from .layers.attention import AttentionLayer
 
 
@@ -18,7 +18,7 @@ class PredictionBlock(nn.Module):
         )
 
     def forward(
-        self, rows: Tensor, *, context_rows: int, key_lengths: Tensor | None = None
+        self, rows: Tensor, *, context_rows: int, weights: FrequencyWeights | None = None, key_lengths: Tensor | None = None
     ) -> Tensor:
         """Map (*batch, training + queries, width) to (*batch, queries, width)."""
         for index, layer in enumerate(self.layers):
@@ -26,25 +26,25 @@ class PredictionBlock(nn.Module):
             # Earlier layers must advance training rows to prepare the next K/V;
             # the final layer needs only query outputs.
             queries = rows[..., context_rows:, :] if index == len(self.layers) - 1 else rows
-            rows = layer.query(queries, keys, key_lengths=key_lengths)
+            rows = layer.query(queries, keys, weights=weights, key_lengths=key_lengths)
         return rows
 
-    def build_context(self, training: Tensor) -> BlockCache:
+    def build_context(self, training: Tensor, weights: FrequencyWeights | None = None) -> BlockCache:
         """Save K/V before each training update, omitting the unused final update."""
         cache = []
         for index, layer in enumerate(self.layers):
             keys = layer.prepare(training)
             cache.append(keys)
             if index + 1 < len(self.layers):
-                training = layer.query(training, keys)
+                training = layer.query(training, keys, weights=weights)
         return BlockCache(tuple(cache))
 
-    def query(self, rows: Tensor, state: BlockCache, *, key_lengths: Tensor | None = None) -> Tensor:
+    def query(self, rows: Tensor, state: BlockCache, weights: FrequencyWeights | None = None, *, key_lengths: Tensor | None = None) -> Tensor:
         """Run query rows through saved contexts without updating the training state."""
         if len(state.layers) != len(self.layers):
             raise ValueError("Prediction cache depth does not match the model")
         for layer, keys in zip(self.layers, state.layers):
-            rows = layer.query(rows, keys, key_lengths=key_lengths)
+            rows = layer.query(rows, keys, weights=weights, key_lengths=key_lengths)
         return rows
 
 

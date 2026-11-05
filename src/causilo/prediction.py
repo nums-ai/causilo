@@ -4,6 +4,7 @@ import torch
 
 from .ecoc import ECOCAccumulator
 from .execution.batched import BatchItem, batched_predictions
+from .nn.cache import FrequencyWeights
 from .outputs import classification_probabilities, regression_predictions, select_regression_output
 
 
@@ -15,6 +16,12 @@ def predict_contexts(model, states, queries, output_options, device):
     """
     if not queries:
         return {}
+    # All ensemble and ECOC members of a fitted context share these counts.
+    # Keep prepared device metadata local to this prediction operation.
+    weights = {
+        key: FrequencyWeights.prepare(torch.from_numpy(state.dataset.frequencies), device)
+        for key, state in states.items() if state.dataset.frequencies is not None
+    }
     results = {}
     decoders = {key: ECOCAccumulator(state.codec) for key, state in states.items() if state.codec is not None}
     rounds = max(len(state.code_datasets) if state.codec is not None else 1 for state in states.values())
@@ -39,7 +46,7 @@ def predict_contexts(model, states, queries, output_options, device):
                 for index, (member, cache) in enumerate(member_caches):
                     items.append(BatchItem(
                         key=(key, index), fitted=dataset, member=member, transformed=queries[key],
-                        cache=cache,
+                        cache=cache, weights=weights.get(key),
                         output_type=output_options[key][0],
                     ))
             predictions = []

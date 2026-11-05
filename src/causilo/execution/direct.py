@@ -11,6 +11,7 @@ import torch
 from ..data.dataset import PreparedDataset
 from ..data.ensemble import EnsembleMember
 from ..model import Model, ModelConfig
+from ..nn.cache import FrequencyWeights
 from .memory import (
     FP32_BYTES,
     MAX_EXECUTION_ATTEMPTS,
@@ -141,6 +142,7 @@ def predict_direct(
     member: EnsembleMember,
     device: torch.device,
     reduce_output: Callable[[torch.Tensor], torch.Tensor],
+    *, weights: FrequencyWeights | None,
 ) -> torch.Tensor:
     """Return one member's CPU outputs, retrying without publishing partial rows."""
     queries = transformed[member.normalization]
@@ -159,7 +161,7 @@ def predict_direct(
         plan = footprint.choose(query_count, budget, device)
         if plan.mode == "recompute":
             return RecomputeRunner(model, device).predict(
-                torch.from_numpy(feature_batch(slice(None))), torch.from_numpy(targets), reduce_output
+                torch.from_numpy(feature_batch(slice(None))), torch.from_numpy(targets), reduce_output, weights=weights
             )[0]
         pieces = []
         tensor = result = target_tensor = None
@@ -167,7 +169,7 @@ def predict_direct(
             target_tensor = torch.as_tensor(targets, device=device)
             for offset in range(0, query_count, plan.queries):
                 tensor = torch.as_tensor(feature_batch(slice(offset, offset + plan.queries)), device=device)
-                result = runner.predict(tensor, target_tensor)
+                result = runner.predict(tensor, target_tensor, weights=weights)
                 pieces.append(reduce_output(result)[0].cpu())
                 tensor = result = None
             return torch.cat(pieces, dim=0)

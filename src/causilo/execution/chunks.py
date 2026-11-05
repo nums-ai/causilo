@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import torch
 from torch import Tensor
 
-from ..nn.cache import BlockCache, CacheResult, KVPair
+from ..nn.cache import BlockCache, CacheResult, FrequencyWeights, KVPair
 from .memory import (
     CUDA_MAX_BATCH_ITEMS,
     MAX_EXECUTION_ATTEMPTS,
@@ -115,11 +115,12 @@ def reshape_keys(state: BlockCache, leading: tuple[int, ...]) -> BlockCache:
 class CacheRunner:
     """Build and query K/V caches with the same feature-group partitioning as rows."""
 
-    def build_column(self, component, rows) -> CacheResult:
+    def build_column(self, component, rows, weights: FrequencyWeights | None = None) -> CacheResult:
         """Return updated training rows and K/V tensors in their original batch layout."""
         leading = rows.shape[:-2]
         items = math.prod(leading)
         packed = rows.reshape(items, *rows.shape[-2:])
+        options = {} if weights is None else {"weights": weights}
         retained_keys = sum(2 * layer.latents.numel() for layer in component.layers)
         workload = Workload(
             Stage.COLUMN, rows.shape[-2], rows.shape[-1], rows.shape[-2], cache_elements=retained_keys
@@ -129,13 +130,13 @@ class CacheRunner:
             training = cache = result = None
             try:
                 if plan.limit == items:
-                    result = component.build_context(packed)
+                    result = component.build_context(packed, **options)
                     return CacheResult(
                         result.rows.reshape(*leading, *rows.shape[-2:]),
                         reshape_keys(result.cache, leading),
                     )
                 for section in plan.slices():
-                    result = component.build_context(packed[section])
+                    result = component.build_context(packed[section], **options)
                     if training is None:
                         training = result.rows.new_empty(packed.shape)
                         cache = BlockCache(
@@ -162,7 +163,7 @@ class CacheRunner:
                 training = cache = result = None
             plan.shrink()
 
-    def query(self, component, rows, state: BlockCache, stage: Stage, *, key_lengths: Tensor | None = None):
+    def query(self, component, rows, state: BlockCache, stage: Stage, weights: FrequencyWeights | None = None, *, key_lengths: Tensor | None = None):
         """Select matching K/V items for each query chunk; retain the full context axis."""
         keys = reshape_keys(state, (-1,))
         lengths = None if key_lengths is None else key_lengths.expand(rows.shape[:-2]).reshape(-1)
@@ -172,7 +173,9 @@ class CacheRunner:
             selected = BlockCache(
                 tuple(KVPair(layer.key[section], layer.value[section]) for layer in keys.layers)
             )
-            options = {} if lengths is None else {"key_lengths": lengths[section]}
+            options = {} if weights is None else {"weights": weights}
+            if lengths is not None:
+                options["key_lengths"] = lengths[section]
             return component.query(part, selected, **options)
 
         return ChunkRunner().run_indexed(apply, rows, workload)

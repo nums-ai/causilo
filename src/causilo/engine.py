@@ -13,6 +13,7 @@ from .data.dataset import PreparedDataset
 from .data.ensemble import EnsembleMember
 from .ecoc import ECOCCodec
 from .execution.runner import ModelCache, ModelRunner
+from .nn.cache import FrequencyWeights
 from .prediction import predict_contexts
 
 
@@ -88,13 +89,14 @@ class Engine:
         use_kv_cache: bool,
         retain_preprocessing: bool,
         random_state: int,
+        sample_count=None,
     ) -> None:
         """Prepare context without optimizing weights; a failed fit stays unfitted."""
         self.state = None
         self.batch_states = None
         self.state = self.prepare_state(
             table, targets, n_estimators=n_estimators, use_kv_cache=use_kv_cache,
-            retain_preprocessing=retain_preprocessing, random_state=random_state,
+            retain_preprocessing=retain_preprocessing, random_state=random_state, sample_count=sample_count,
         )
 
     def prepare_state(
@@ -106,6 +108,7 @@ class Engine:
         use_kv_cache: bool,
         retain_preprocessing: bool,
         random_state: int,
+        sample_count=None,
     ) -> FitState:
         """Build a complete context without publishing or replacing fitted state."""
         if isinstance(n_estimators, bool) or not isinstance(n_estimators, Integral) or n_estimators < 1:
@@ -127,6 +130,7 @@ class Engine:
             retain_preprocessing=retain_preprocessing,
             random_state=int(random_state),
             class_permutation_size=self.model.config.outputs,
+            sample_count=sample_count,
         )
         codec = None
         code_datasets = None
@@ -145,12 +149,13 @@ class Engine:
         caches = None
         code_caches = None
         if use_kv_cache:
+            weights = self._frequency_weights(prepared)
             runner = ModelRunner(self.model)
             with torch.inference_mode():
                 if codec is None:
-                    caches = self._build_caches(runner, prepared)
+                    caches = self._build_caches(runner, prepared, weights=weights)
                 else:
-                    code_caches = tuple(self._build_caches(runner, dataset) for dataset in code_datasets)
+                    code_caches = tuple(self._build_caches(runner, dataset, weights=weights) for dataset in code_datasets)
         return FitState(
             dataset=prepared,
             caches=caches,
@@ -159,12 +164,20 @@ class Engine:
             code_datasets=code_datasets,
         )
 
-    def _build_caches(self, runner: ModelRunner, fitted: PreparedDataset) -> tuple[ModelCache, ...]:
+    def _frequency_weights(self, fitted: PreparedDataset) -> FrequencyWeights | None:
+        """Prepare execution-only metadata once for all fitted cache contexts."""
+        if fitted.frequencies is None:
+            return None
+        return FrequencyWeights.prepare(torch.from_numpy(fitted.frequencies), self.device)
+
+    def _build_caches(
+        self, runner: ModelRunner, fitted: PreparedDataset, *, weights: FrequencyWeights | None
+    ) -> tuple[ModelCache, ...]:
         collected = []
         for member in fitted.members_by_normalization():
             features = fitted.training_table(member.normalization)[:, member.feature_order]
             collected.append(
-                runner.build_cache(self._tensor(features), self._tensor(fitted.targets_for(member)))
+                runner.build_cache(self._tensor(features), self._tensor(fitted.targets_for(member)), weights=weights)
             )
         return tuple(collected)
 

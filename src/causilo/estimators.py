@@ -44,7 +44,7 @@ def publish_fitted_attributes(estimator):
         estimator.classes_ = state.target_encoder.classes_
 
 
-def fit_adapter(estimator, X, y, task):
+def fit_adapter(estimator, X, y, task, sample_count=None):
     """Invalidate old fitted attributes before replacing the engine's context."""
     invalidate_fit(estimator)
     engine = engine_for_fit(estimator, task)
@@ -55,6 +55,7 @@ def fit_adapter(estimator, X, y, task):
         use_kv_cache=estimator.use_kv_cache,
         retain_preprocessing=estimator.retain_preprocessing,
         random_state=estimator.random_state,
+        sample_count=sample_count,
     )
     publish_fitted_attributes(estimator)
     return estimator
@@ -139,15 +140,20 @@ class CausiloClassifier(ClassifierMixin, BaseEstimator):
         self.retain_preprocessing = retain_preprocessing
         self.checkpoint_path = checkpoint_path
 
-    def fit(self, X, y):
+    def fit(self, X, y, sample_count=None):
         """Prepare a context from X (rows, features) and y (rows,); return self.
 
         No gradient training occurs. Feature NaNs are supported, target NaNs
         are rejected. The native head uses error-correcting output
         codes when there are more than ten target classes.
         Parameter changes take effect on refit; a failed refit clears old state.
+
+        sample_count optionally gives nonnegative integer repetition counts,
+        one per row. Zero-count rows are ignored. Counts reproduce repeated
+        observations without expanding the table; fractional importance weights
+        are unsupported. Omitting counts preserves the ordinary fit behavior.
         """
-        return fit_adapter(self, X, y, "classification")
+        return fit_adapter(self, X, y, "classification", sample_count)
 
     def predict_proba(self, X):
         """Return (rows, classes) probabilities using the fitted feature schema."""
@@ -232,12 +238,14 @@ class CausiloRegressor(RegressorMixin, BaseEstimator):
         self.retain_preprocessing = retain_preprocessing
         self.checkpoint_path = checkpoint_path
 
-    def fit(self, X, y):
+    def fit(self, X, y, sample_count=None):
         """Prepare X (rows, features) and finite y (rows,) without weight updates.
 
         Return self. Feature NaNs are supported; a failed refit clears old state.
+        sample_count optionally gives nonnegative integer repetition counts;
+        zero-count rows are ignored and fractional weights are unsupported.
         """
-        return fit_adapter(self, X, y, "regression")
+        return fit_adapter(self, X, y, "regression", sample_count)
 
     def predict(self, X, *, output_type: str = "mean", quantiles=None):
         """Predict in target units using the selected output mode.

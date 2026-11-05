@@ -120,3 +120,51 @@ then, prediction and saved fitted state use the previously loaded weights. Keep
 local checkpoint files unchanged while using a fitted estimator; to load updated
 weights at the same path, construct a new estimator. Relocating the files for
 restoration is not supported by this interface.
+
+## Aggregated observations and repetition counts
+
+Both estimators accept optional `sample_count` in `fit`. Each entry is an
+**integer repetition count**: a row with count 30 represents 30 identical
+observations with the same features and target. Counts are not loss weights or
+arbitrary importance scores. Omitting them keeps the usual `fit(X, y)` behavior.
+`fit_batched` does not accept counts.
+
+For binomial data, represent each group by a success row and a failure row:
+
+```python
+import numpy as np
+from causilo import CausiloClassifier
+
+# X_group contains one feature row per group; successes and trials are counts.
+# This indexing works for a NumPy feature table.
+rows = np.repeat(np.arange(len(X_group)), 2)
+X = X_group[rows]
+y = np.tile([1, 0], len(X_group))
+counts = np.column_stack([successes, trials - successes]).ravel()
+
+classifier = CausiloClassifier().fit(X, y, sample_count=counts)
+p_success = classifier.predict_proba(X_test)[:, list(classifier.classes_).index(1)]
+```
+
+For a DataFrame, use `X_group.iloc[rows]` to preserve column names and types.
+This creates at most two rows per group, regardless of its trial count. Different
+observations can only be combined when their features **and target** are identical;
+the estimator does not automatically group rows. Success proportions alone do
+not recover the individual observations when features vary within a group.
+
+Counts must be finite nonnegative integers, one per input row, with a positive
+sum no larger than `2**53`. Integer-valued floats are accepted; fractional values
+are rejected. Zero-count rows are removed before fitting feature mappings,
+classes, or preprocessing. All-one counts use the ordinary unweighted path.
+
+Counts apply to both preprocessing and prediction. Results can differ from
+explicit row repetition because of floating-point rounding. CUDA's default mixed
+precision can also change predicted labels near a decision boundary. Time and
+memory savings depend on the data, device, and cache settings.
+
+This change also fixes missing-value rank normalization. Newly fitted models,
+including unweighted fits, may give different predictions in affected cases.
+Previously saved models retain their fitted preprocessing.
+
+Saved estimators retain their counts. Restoring a fitted model requires matching
+versions; older versions without count support reject weighted saved models.

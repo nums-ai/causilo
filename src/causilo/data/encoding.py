@@ -25,7 +25,7 @@ class FeatureEncoder:
     retained: np.ndarray
 
     @classmethod
-    def fit(cls, table) -> tuple["FeatureEncoder", np.ndarray]:
+    def fit(cls, table, *, effective_rows: int | None = None) -> tuple["FeatureEncoder", np.ndarray]:
         """Infer column kinds and return the schema plus nonconstant encoded features."""
         is_dataframe = isinstance(table, pd.DataFrame)
         array = np.asarray(table)
@@ -62,7 +62,7 @@ class FeatureEncoder:
             )
             schema.encoder.fit(schema._categorical(table))
         numeric = schema.encode(table)
-        if len(numeric) > 1:
+        if (len(numeric) if effective_rows is None else effective_rows) > 1:
             schema.retained = np.array([np.unique(column).size > 1 for column in numeric.T])
         if not schema.retained.any():
             raise ValueError("At least one varying feature is required")

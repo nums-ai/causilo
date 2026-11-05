@@ -9,6 +9,7 @@ import torch
 from ..data.dataset import PreparedDataset
 from ..data.ensemble import EnsembleMember
 from ..model import Model, ModelConfig
+from ..nn.cache import FrequencyWeights
 from .memory import (
     FP32_BYTES,
     MAX_EXECUTION_ATTEMPTS,
@@ -40,6 +41,7 @@ def predict_cached(
     context: ModelCache,
     device: torch.device,
     reduce_output: Callable[[torch.Tensor], torch.Tensor],
+    *, weights: FrequencyWeights | None,
 ) -> torch.Tensor:
     """Return one cached member's CPU outputs, retaining completed query chunks."""
     runner = ModelRunner(model)
@@ -71,7 +73,7 @@ def predict_cached(
                     device=device,
                     dtype=torch.float32,
                 ).unsqueeze(0)
-                result = reduce_output(runner.predict_cached(table, context))[0].cpu()
+                result = reduce_output(runner.predict_cached(table, context, weights=weights))[0].cpu()
                 pieces.append(result)
                 completed = True
             except RuntimeError as error:
