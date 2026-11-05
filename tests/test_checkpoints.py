@@ -98,6 +98,7 @@ def test_custom_checkpoint_roundtrip(
     estimator = constructor(n_estimators=1, device="cpu", use_kv_cache=cache, checkpoint_path=path)
     estimator.fit(table, target)
     expected = predictions(estimator, table[:3])
+    logits = estimator.predict_logits(table[:3]) if task == "classification" else None
     monkeypatch.setattr(ModelRunner, "build_cache", lambda *a, **k: pytest.fail("Rebuilt saved cache"))
     payload = io.BytesIO()
     serializer.dump(estimator, payload)
@@ -105,8 +106,26 @@ def test_custom_checkpoint_roundtrip(
     restored = serializer.load(payload)
     assert restored.checkpoint_path == path
     np.testing.assert_array_equal(predictions(restored, table[:3]), expected)
+    if logits is not None:
+        np.testing.assert_array_equal(restored.predict_logits(table[:3]), logits)
     if cache:
         assert restored._engine.state.caches is not None
+
+
+@pytest.mark.parametrize("cache", [False, True])
+def test_logits_respect_custom_checkpoint_capacity(checkpoint_factory, data, cache, monkeypatch):
+    weights = checkpoint_factory("classification")  # three native outputs
+    table, target = data
+    model = CausiloClassifier(
+        n_estimators=2, device="cpu", use_kv_cache=cache, checkpoint_path=weights,
+    ).fit(table, target)
+    assert model.predict_logits(table[:2]).shape == (2, 3)
+    model.fit(table, np.arange(len(table)) % 4)
+    probabilities = model.predict_proba(table[:2])
+    assert probabilities.shape == (2, 4)
+    monkeypatch.setattr(model._engine.state.dataset, "query_tables", lambda *a: pytest.fail("Processed query"))
+    with pytest.raises(NotImplementedError, match="at most 3 classes.*ECOC"):
+        model.predict_logits(table[:2])
 
 
 def test_default_route_preserves_legacy_saved_state(constructor, task, checkpoint_factory, data, monkeypatch):

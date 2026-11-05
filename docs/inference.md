@@ -1,5 +1,22 @@
 # Inference details
 
+## Classification outputs
+
+For a fitted `CausiloClassifier`, `predict_logits(X)` returns
+**ensemble-averaged logits** before softmax:
+
+```python
+logits = classifier.predict_logits(X_test)
+```
+
+The NumPy result has shape `(n_samples, n_classes)`, with two columns for binary
+classification. Member scores are aligned to `classes_` before averaging.
+Applying `scipy.special.softmax(logits, axis=1)` matches `predict_proba(X)`.
+
+Requires single-table `fit` and at most **10 classes**, or the custom checkpoint's
+native head capacity if smaller. ECOC models raise `NotImplementedError` before
+inference.
+
 ## Regression outputs
 
 For `CausiloRegressor`, choose the prediction output with `output_type`:
