@@ -28,10 +28,15 @@ def reduce_regression_output(result, output_type):
     return ordered.mean(dim=-1) if output_type == "mean" else ordered
 
 
-def classification_probabilities(predictions):
-    """Combine (member, CPU logits) pairs in their fitted ensemble order."""
+def classification_logits(predictions):
+    """Restore class order and average (member, CPU logits) pairs in fitted order."""
     logits = [result[:, member.class_order].numpy() for member, result in predictions]
-    combined = np.mean(logits, axis=0)
+    return np.mean(logits, axis=0)
+
+
+def classification_probabilities(predictions):
+    """Apply softmax to the class-aligned, ensemble-averaged logits."""
+    combined = classification_logits(predictions)
     probabilities = np.exp(combined - combined.max(axis=-1, keepdims=True))
     return probabilities / probabilities.sum(axis=-1, keepdims=True)
 

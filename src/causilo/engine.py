@@ -198,6 +198,13 @@ class Engine:
     def predict(self, table, *, output_type="mean", levels=None) -> np.ndarray:
         """Run a single fitted context through the shared prediction pipeline."""
         state = self.require_state()
+        if self.task == "classification" and output_type == "logits":
+            limit = min(10, self.model.config.outputs)
+            if state.codec is not None or len(state.dataset.target_encoder.classes_) > limit:
+                raise NotImplementedError(
+                    f"predict_logits supports native classification with at most {limit} classes "
+                    "for the fitted checkpoint; ECOC logits are not supported"
+                )
         transformed = state.dataset.query_tables(table)
         if not len(next(iter(transformed.values()))):
             raise ValueError("Query table must contain at least one row")

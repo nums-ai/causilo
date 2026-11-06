@@ -110,7 +110,7 @@ class CausiloClassifier(ClassifierMixin, BaseEstimator):
     Attributes
     ----------
     classes_ : numpy.ndarray
-        Original class labels in predict_proba column order.
+        Original class labels in predict_proba and predict_logits column order.
     n_features_in_ : int
         Input width before constant features are removed.
     feature_names_in_ : numpy.ndarray
@@ -158,6 +158,20 @@ class CausiloClassifier(ClassifierMixin, BaseEstimator):
     def predict_proba(self, X):
         """Return (rows, classes) probabilities using the fitted feature schema."""
         return fitted_engine(self).predict(X)
+
+    def predict_logits(self, X):
+        """Return class-aligned, ensemble-averaged logits before softmax.
+
+        The NumPy array has shape (n_samples, n_classes), with columns in
+        classes_ order and two columns for binary classification. Applying
+        softmax along the class axis gives predict_proba(X).
+
+        Requires a successful single-table fit and at most 10 classes within
+        the fitted checkpoint's native head capacity. ECOC models raise
+        NotImplementedError before inference; a custom head with fewer outputs
+        lowers the class limit.
+        """
+        return fitted_engine(self).predict(X, output_type="logits")
 
     def predict(self, X):
         """Return the original label with highest probability for each input row."""

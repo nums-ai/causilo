@@ -1,5 +1,30 @@
 # Inference details
 
+## Classification outputs
+
+For a fitted `CausiloClassifier`, choose the prediction method for the output
+you need:
+
+| Method | Output | Shape |
+| --- | --- | --- |
+| `predict(X)` | Predicted class labels | `(n_samples,)` |
+| `predict_proba(X)` | Class probabilities | `(n_samples, n_classes)` |
+| `predict_logits(X)` | Ensemble-averaged logits before softmax | `(n_samples, n_classes)` |
+
+```python
+labels = classifier.predict(X_test)
+probabilities = classifier.predict_proba(X_test)
+logits = classifier.predict_logits(X_test)
+```
+
+All three methods return NumPy arrays. Probability and logit columns follow
+`classes_`, with two columns for binary classification. Applying
+`scipy.special.softmax(logits, axis=1)` matches `predict_proba(X_test)`.
+
+`predict_logits` supports single-table fits with at most 10 classes, or the
+checkpoint's native head capacity if smaller. It raises `NotImplementedError`
+for ECOC models.
+
 ## Regression outputs
 
 For `CausiloRegressor`, choose the prediction output with `output_type`:

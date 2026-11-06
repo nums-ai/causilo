@@ -5,7 +5,12 @@ import torch
 from .ecoc import ECOCAccumulator
 from .execution.batched import BatchItem, batched_predictions
 from .nn.cache import FrequencyWeights
-from .outputs import classification_probabilities, regression_predictions, select_regression_output
+from .outputs import (
+    classification_logits,
+    classification_probabilities,
+    regression_predictions,
+    select_regression_output,
+)
 
 
 def predict_contexts(model, states, queries, output_options, device):
@@ -60,12 +65,15 @@ def predict_contexts(model, states, queries, output_options, device):
                 key = item.key[0]
                 state = states[key]
                 if model.config.task == "classification":
-                    probabilities = classification_probabilities(predictions)
-                    if state.codec is None:
-                        results[key] = probabilities
+                    if output_options[key][0] == "logits":
+                        results[key] = classification_logits(predictions)
                     else:
-                        decoders[key].add(probabilities)
-                    del probabilities
+                        probabilities = classification_probabilities(predictions)
+                        if state.codec is None:
+                            results[key] = probabilities
+                        else:
+                            decoders[key].add(probabilities)
+                        del probabilities
                 else:
                     output_type, levels = output_options[key]
                     result = regression_predictions((value for _, value in predictions), state.dataset.target_encoder)
