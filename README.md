@@ -44,6 +44,10 @@ examples.
 For repeated observations, pass `sample_count` to `fit` instead of repeating rows.
 See [aggregated observations](docs/inference.md#aggregated-observations-and-repetition-counts) for an example and input rules.
 
+For input gradients of supported single-estimator numeric fits, see
+[differentiable query prediction](docs/differentiable.md). This separate tensor
+interface preserves the fitted prediction function and leaves ordinary prediction unchanged.
+
 ## Benchmarks
 
 Evaluated using the official TabArena pipeline: 51 datasets, 51 Lite splits and 816 Full splits, using the default configuration with eight estimators and seed 42. System methods are excluded. Full plots show the top 16 model families by their best Elo, with default, tuned and ensembled variants.

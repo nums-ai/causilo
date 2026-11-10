@@ -178,6 +178,17 @@ class CausiloClassifier(ClassifierMixin, BaseEstimator):
         probabilities = self.predict_proba(X)
         return self.classes_[probabilities.argmax(axis=1)]
 
+    def differentiable_predictor(self, *, output_type: str = "probability"):
+        """Return a fixed-context tensor predictor for input differentiation.
+
+        Supports a model fitted with one estimator and numeric features;
+        output_type is 'probability' or 'logits'. Existing fit/predict behavior
+        is unchanged. See docs/differentiable.md for the supported contract.
+        """
+        from .differentiable import DifferentiablePredictor
+
+        return DifferentiablePredictor(self, output_type=output_type)
+
     def fit_batched(self, tables):
         """Fit independent contexts from {table_id: (X, y)}; return self.
 
@@ -269,6 +280,17 @@ class CausiloRegressor(RegressorMixin, BaseEstimator):
         """
         levels = validate_regression_output(output_type, quantiles)
         return fitted_engine(self).predict(X, output_type=output_type, levels=levels)
+
+    def differentiable_predictor(self, *, output_type: str = "mean"):
+        """Return a fixed-context tensor predictor for input differentiation.
+
+        Supports a model fitted with one estimator and numeric features;
+        output_type is 'mean' or 'median', in original target units. Existing
+        fit/predict behavior is unchanged. See docs/differentiable.md.
+        """
+        from .differentiable import DifferentiablePredictor
+
+        return DifferentiablePredictor(self, output_type=output_type)
 
     def fit_batched(self, tables):
         """Fit independent contexts from {table_id: (X, y)}; return self."""
