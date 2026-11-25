@@ -1,21 +1,20 @@
-# Benchmarks
+# Causilo 1.5 benchmarks
 
-Performance comparisons use Causilo results alongside the baseline result files provided by TabArena. Our local reruns of TabICLv2 and TabPFN-3 are used only for the resource comparison below.
+[Detailed results and evaluation protocols](https://huggingface.co/nums-ai/causilo-1.5/blob/4ca2275bae85014a19422e8c18fcf8f24c5c14e1/benchmarks/README.md) · [Checkpoints](../checkpoints.md)
 
-## Resource comparison
+Each entry shows overall rank and Elo. The benchmark links contain dataset scores, split results, and full leaderboards.
 
-All three models were rerun locally on the same H100 80 GB server, using one GPU and eight physical CPU cores per job. Times are median seconds per 1,000 rows; memory is mean peak usage during fit only.
+| Benchmark | 1.5 | 1.5 (Light) |
+| --- | ---: | ---: |
+| [TabArena](https://huggingface.co/nums-ai/causilo-1.5/tree/4ca2275bae85014a19422e8c18fcf8f24c5c14e1/benchmarks/tabarena) | #1 · 2,037.1 | #3 · 1,976.8 |
+| [BeyondArena Core2K](https://huggingface.co/nums-ai/causilo-1.5/tree/4ca2275bae85014a19422e8c18fcf8f24c5c14e1/benchmarks/beyondarena) | #1 · 1,446.4 | #3 · 1,390.4 |
+| [ScoringBench](https://huggingface.co/nums-ai/causilo-1.5/tree/4ca2275bae85014a19422e8c18fcf8f24c5c14e1/benchmarks/scoringbench) | #1 · 2,284.0 | #3 · 2,205.9 |
+| [MulTaBench Image](https://huggingface.co/nums-ai/causilo-1.5/tree/4ca2275bae85014a19422e8c18fcf8f24c5c14e1/benchmarks/multabench-image) | #1 · 1,883.0 | #2 · 1,840.4 |
+| [MulTaBench Text](https://huggingface.co/nums-ai/causilo-1.5/tree/4ca2275bae85014a19422e8c18fcf8f24c5c14e1/benchmarks/multabench-text) | #1 · 1,820.7 | #3 · 1,786.1 |
+| [RamanBench](https://huggingface.co/nums-ai/causilo-1.5/tree/4ca2275bae85014a19422e8c18fcf8f24c5c14e1/benchmarks/ramanbench) | #1 · 1,570.4 | #2 · 1,540.4 |
+| [STRABLE](https://huggingface.co/nums-ai/causilo-1.5/tree/4ca2275bae85014a19422e8c18fcf8f24c5c14e1/benchmarks/strable) | #1 · 1,878.8 | #2 · 1,825.4 |
+| [TabBench-Bio](https://huggingface.co/nums-ai/causilo-1.5/tree/4ca2275bae85014a19422e8c18fcf8f24c5c14e1/benchmarks/tabbench-bio) | #1 · 1,250.0 | #3 · 1,229.0 |
+| [TabBioMed](https://huggingface.co/nums-ai/causilo-1.5/tree/4ca2275bae85014a19422e8c18fcf8f24c5c14e1/benchmarks/tabbiomed) | #1 · 1,524.2 | #2 · 1,497.7 |
+| [TALENT](https://huggingface.co/nums-ai/causilo-1.5/tree/4ca2275bae85014a19422e8c18fcf8f24c5c14e1/benchmarks/talent) | #1 · 1,982.4 | #3 · 1,930.9 |
 
-| Task           | Model    |   Fit (s/1k) |   Predict (s/1k) |   CPU (GiB) |   GPU (GiB) |
-|:---------------|:---------|-------------:|-----------------:|------------:|------------:|
-| Overall | **Causilo** | **2.504** | **0.251** | **1.94** | 8.15 |
-| Overall | TabICLv2 | 3.449 | 0.303 | 2 | 8.37 |
-| Overall | TabPFN-3 | 4.18 | 0.686 | 2.87 | **0.88** |
-| Classification | **Causilo** | **2.568** | **0.272** | **1.95** | 8.36 |
-| Classification | TabICLv2 | 3.51 | 0.335 | 2 | 8.96 |
-| Classification | TabPFN-3 | 4.185 | 0.703 | 2.9 | **0.81** |
-| Regression | **Causilo** | **1.682** | **0.212** | **1.92** | 7.54 |
-| Regression | TabICLv2 | 1.909 | 0.216 | 1.99 | 6.64 |
-| Regression | TabPFN-3 | 3.19 | 0.498 | 2.81 | **1.07** |
-
-[Evaluation provenance and software versions](provenance.json).
+[TabArena timings](https://huggingface.co/nums-ai/causilo-1.5/blob/4ca2275bae85014a19422e8c18fcf8f24c5c14e1/benchmarks/tabarena/timing.csv) · [Evaluated checkpoints](https://huggingface.co/nums-ai/causilo-1.5/blob/4ca2275bae85014a19422e8c18fcf8f24c5c14e1/benchmarks/README.md#checkpoints-and-inference)

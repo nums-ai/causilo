@@ -7,7 +7,7 @@ import joblib
 import numpy as np
 import torch
 
-from causilo.execution.runner import ModelRunner
+from causilo.v1_0.execution.runner import ModelRunner
 
 
 def reject_rebuild(*args):
@@ -19,7 +19,7 @@ if __name__ == "__main__":
     parser.add_argument("saved", type=Path)
     parser.add_argument("output", type=Path)
     arguments = parser.parse_args()
-    ModelRunner.build = reject_rebuild
+    ModelRunner.build_cache = reject_rebuild
     torch.set_num_threads(2)
     estimator, query = joblib.load(arguments.saved)
     np.save(arguments.output, estimator.predict(query))

@@ -1,6 +1,6 @@
-"""Tabular prediction with fixed pretrained context models."""
+"""Tabular prediction with fixed model weights and an inference context."""
 
-__version__ = "1.0.3"
+__version__ = "1.5.0"
 
 from .estimators import CausiloClassifier, CausiloRegressor
 
