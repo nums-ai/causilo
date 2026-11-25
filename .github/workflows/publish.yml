@@ -30,16 +30,19 @@ jobs:
           import re
           from pathlib import Path
 
+          raw = 'https://raw.githubusercontent.com/nums-ai/causilo/main/'
+          github = 'https://github.com/nums-ai/causilo/blob/main/'
+
           def absolute(match):
               image, label, target = match.groups()
               if target.startswith(('https://', 'http://', 'mailto:', '#')):
                   return match.group(0)
-              base = ('https://raw.githubusercontent.com/nums-ai/causilo/main/' if image
-                      else 'https://github.com/nums-ai/causilo/blob/main/')
-              return f'{image}[{label}]({base}{target})'
+              return f'{image}[{label}]({raw if image else github}{target})'
 
           readme = Path('README.md')
-          readme.write_text(re.sub(r'(!?)\[([^\]]+)\]\(([^)]+)\)', absolute, readme.read_text()))
+          content = re.sub(r'(!?)\[([^\]]+)\]\(([^)]+)\)', absolute, readme.read_text())
+          content = re.sub(r'(\b(?:src|srcset)=")(docs/[^"]+)"', rf'\g<1>{raw}\2"', content)
+          readme.write_text(content)
           PY
       - name: Build and check distributions
         run: |

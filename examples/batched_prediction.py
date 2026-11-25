@@ -1,13 +1,16 @@
 """Fit differently sized tables, then request independent regression outputs."""
 
+from _model_options import model_options
 from sklearn.datasets import make_regression
 
 from causilo import CausiloRegressor
 
+options = model_options(__doc__)
+
 sales, sales_target = make_regression(n_samples=80, n_features=5, random_state=1)
 price, price_target = make_regression(n_samples=100, n_features=8, random_state=2)
 
-model = CausiloRegressor(n_estimators=2)
+model = CausiloRegressor(n_estimators=2, **options)
 model.fit_batched({
     "sales": (sales[:60], sales_target[:60]),
     "price": (price[:70], price_target[:70]),

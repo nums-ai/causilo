@@ -2,11 +2,10 @@
 
 from collections.abc import Mapping
 
-import numpy as np
 from sklearn.exceptions import NotFittedError
 
-from .outputs import validate_regression_output
-from .prediction import predict_contexts
+from .model_selection import runtime_for
+from .validation import validate_regression_output
 
 
 def validate_mapping(tables, *, allow_empty=False):
@@ -17,7 +16,7 @@ def validate_mapping(tables, *, allow_empty=False):
 
 
 def fit_batched(estimator, tables, task):
-    from .estimators import engine_for_fit, invalidate_fit, publish_fitted_attributes
+    from .estimators import engine_for_fit, fit_options, invalidate_fit, publish_fitted_attributes
 
     invalidate_fit(estimator)
     validate_mapping(tables)
@@ -25,15 +24,11 @@ def fit_batched(estimator, tables, task):
         if not isinstance(value, (tuple, list)) or len(value) != 2:
             raise ValueError(f"Table {key!r}: expected (X, y)")
     engine = engine_for_fit(estimator, task)
+    options = fit_options(estimator, engine)
     states = {}
     for key, (X, y) in tables.items():
         try:
-            states[key] = engine.prepare_state(
-                X, y, n_estimators=estimator.n_estimators,
-                use_kv_cache=estimator.use_kv_cache,
-                retain_preprocessing=estimator.retain_preprocessing,
-                random_state=estimator.random_state,
-            )
+            states[key] = engine.prepare_state(X, y, **options)
         except (ValueError, TypeError) as error:
             raise type(error)(f"Table {key!r}: {error}") from error
     # Publish once, after every context has been prepared successfully.
@@ -42,9 +37,10 @@ def fit_batched(estimator, tables, task):
     return estimator
 
 
-def _prepare_queries(engine, tables):
+def prepare_queries(engine, tables, prepare_query):
     """Validate every query before dispatching any model work."""
     validate_mapping(tables, allow_empty=True)
+    allowed = {"X", "output_type", "quantiles"} if engine.task == "regression" else {"X"}
     queries, outputs = {}, {}
     for key, value in tables.items():
         if key not in engine.batch_states:
@@ -52,23 +48,14 @@ def _prepare_queries(engine, tables):
         try:
             output_type, levels = "mean", None
             if isinstance(value, Mapping):
-                allowed = {"X", "output_type", "quantiles"} if engine.task == "regression" else {"X"}
-                unknown = set(value) - allowed
-                if unknown or "X" not in value:
+                if set(value) - allowed or "X" not in value:
                     raise ValueError("Expected X and only supported prediction options")
-                X = value["X"]
+                table = value["X"]
                 output_type = value.get("output_type", "mean")
-                quantiles = value.get("quantiles")
-                levels = validate_regression_output(output_type, quantiles)
+                levels = validate_regression_output(output_type, value.get("quantiles"))
             else:
-                X = value
-            shape = np.asarray(X).shape
-            width = engine.batch_states[key].dataset.encoder.width
-            if len(shape) != 2 or shape[1] != width:
-                raise ValueError(f"Expected a two-dimensional table with {width} feature columns")
-            if shape[0] == 0:
-                raise ValueError("Query table must contain at least one row")
-            queries[key] = engine.batch_states[key].dataset.query_tables(X)
+                table = value
+            queries[key] = prepare_query(engine.batch_states[key], table)
             outputs[key] = output_type, levels
         except (ValueError, TypeError) as error:
             raise type(error)(f"Table {key!r}: {error}") from error
@@ -81,6 +68,4 @@ def predict_batched(estimator, tables):
         raise NotFittedError("Call fit_batched successfully before batched prediction")
     if engine.batch_states is None:
         raise ValueError("This estimator was fitted with fit; use predict or refit with fit_batched")
-    queries, output_options = _prepare_queries(engine, tables)
-    states = {key: engine.batch_states[key] for key in queries}
-    return predict_contexts(engine.model, states, queries, output_options, engine.device)
+    return runtime_for(engine.source.architecture).predict_batched(engine, tables)
