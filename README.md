@@ -22,10 +22,10 @@
 
 ### Installation
 
-Install from a source checkout.
+Install [Causilo 1.5 from PyPI](https://pypi.org/project/causilo/1.5.0/).
 
 ```sh
-python -m pip install .
+python -m pip install causilo==1.5.0
 ```
 
 The first `fit` downloads the [public Causilo 1.5 checkpoint](https://huggingface.co/nums-ai/causilo-1.5) for the estimator's task. No Hugging Face account is required.
