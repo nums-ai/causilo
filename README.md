@@ -25,10 +25,10 @@
 Install [Causilo from PyPI](https://pypi.org/project/causilo/).
 
 ```sh
-python -m pip install causilo
+pip install causilo
 ```
 
-If you already have Causilo, upgrade with `python -m pip install --upgrade causilo`.
+If you already have Causilo, upgrade with `pip install --upgrade causilo`.
 
 The first `fit` downloads the [public Causilo 1.5 checkpoint](https://huggingface.co/nums-ai/causilo-1.5) for the estimator's task. No Hugging Face account is required.
 
