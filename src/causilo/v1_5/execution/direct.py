@@ -73,6 +73,16 @@ def predict_chunks(
         batch_size = (section.stop - start) // 2
 
 
+class PredictionLock:
+    """Share synchronization across runners, recreating an unlocked lock on load."""
+
+    def __init__(self):
+        self.lock = Lock()
+
+    def __reduce__(self):
+        return type(self), ()
+
+
 class EnsembleRunner:
     """Run ordered, bounded groups of ensemble members on the selected device."""
 
@@ -88,19 +98,23 @@ class EnsembleRunner:
         self.memory_budget_bytes = memory_budget_bytes
 
         self._model_runner = ModelRunner(model, device)
-        self._prediction_lock = Lock() if prediction_lock is None else prediction_lock
+        self._prediction_lock = PredictionLock() if prediction_lock is None else prediction_lock
         self._length_gains = {}
         self._stream = None
         self.weights = (
             FrequencyWeights.prepare(torch.as_tensor(frequencies, device=device)) if frequencies is not None else None
         )
 
+    def __getstate__(self):
+        """Keep fitted data and shared references, excluding stream-local execution caches."""
+        return self.__dict__ | {"_stream": None, "_length_gains": {}}
+
     @contextmanager
     def _inference(self):
         cuda = self.device.type == "cuda"
         device_context = torch.cuda.device(self.device) if cuda else nullcontext()
         with (
-            self._prediction_lock, device_context, torch.inference_mode(),
+            self._prediction_lock.lock, device_context, torch.inference_mode(),
             planning_budget(self.device, self.memory_budget_bytes),
         ):
             if cuda:

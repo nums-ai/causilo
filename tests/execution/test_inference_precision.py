@@ -15,6 +15,27 @@ from causilo.v1_5.nn.layers.functional import unit_rms
 from causilo.v1_5.nn.model_config import ModelConfig
 
 
+def test_model_placement_keeps_checkpoint_parameters():
+    model = FeedForward(width=8, expansion=2).eval()
+    expected = {name: value.clone() for name, value in model.state_dict().items()}
+    placed = precision.place_model(model, torch.device("cpu"), bf16_output_projection=True)
+    assert placed is model
+    torch.testing.assert_close(model.state_dict(), expected, rtol=0, atol=0)
+    assert torch.equal(model._output_weight_bf16, model.output.weight.bfloat16())
+    assert torch.equal(model._output_bias_bf16, model.output.bias.bfloat16())
+
+
+@pytest.mark.skipif(not torch.cuda.is_available(), reason="Requires CUDA model placement")
+def test_model_placement_can_keep_fp32_output_on_bf16_hardware():
+    device = torch.device("cuda:0")
+    if not precision.supports_bf16(device):
+        pytest.skip("Requires native CUDA BF16")
+    model = FeedForward(width=8, expansion=2).eval()
+    precision.place_model(model, device, bf16_output_projection=False)
+    assert model.output.weight.device == device
+    assert model._output_weight_bf16 is None and model._output_bias_bf16 is None
+
+
 @torch.inference_mode()
 def test_cpu_prefix_normalization_preserves_the_full_residual():
     rows = torch.randn(2, 7, 12)
