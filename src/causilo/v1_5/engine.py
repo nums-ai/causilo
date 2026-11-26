@@ -129,6 +129,7 @@ class Engine:
         if missing:
             if self.checkpoint is not None:
                 expected_digest = self.checkpoint["digest"]
+            stamp = checkpoints.weights_stamp(self.source)
             identity = checkpoints.checkpoint_identity(self.source, expected_digest=expected_digest)
             source = checkpoints.source_key(self.source, identity)
             keys = {device: (self.task, source, str(device)) for device in missing}
@@ -154,6 +155,9 @@ class Engine:
                     device=first if first.type == "cuda" else None,
                     validate=check_budgets if budgeted else None,
                 )
+                if checkpoints.weights_stamp(self.source) != stamp:
+                    # The loaded weights may not be the fingerprinted ones; never share or record them.
+                    raise ValueError("The local checkpoint changed while it was loading; fit again")
                 loaded = {}
                 for device in unloaded[1:]:
                     # Each replica gets its own modules and copies the template's weights.

@@ -1,5 +1,6 @@
 """Load official or local safetensors weights and verify their configuration."""
 
+import os
 from pathlib import Path
 
 import torch
@@ -20,7 +21,8 @@ from .nn.model import Model
 def load_checkpoint(checkpoint: LocalCheckpoint, task: str, device=None, validate=None) -> torch.nn.Module:
     """Validate a resolved checkpoint before constructing the selected model.
 
-    A CUDA device receives the weights directly; otherwise they stay on the CPU.
+    A CUDA device receives the weights directly, using at most one upload chunk of
+    device memory beyond them; otherwise they stay on the CPU.
     ``validate`` receives a weightless model of the checkpoint's shape before any
     weights are read, so callers can reject it without allocating device memory.
     """
@@ -28,14 +30,18 @@ def load_checkpoint(checkpoint: LocalCheckpoint, task: str, device=None, validat
     checkpoint_task = checkpoint.config["task"]
     if checkpoint_task != task:
         raise ValueError(f"The checkpoint at {checkpoint.weights} is for {checkpoint_task}, not {task}")
+    # One weightless model serves validation, the target dtypes, and the loaded model itself.
+    with torch.device("meta"):
+        shape = Model(config)
     if validate is not None:
-        with torch.device("meta"):
-            validate(Model(config))
+        validate(shape)
     if device is not None and torch.device(device).type == "cuda":
-        tensors = read_tensors_to_device(checkpoint, task=task, device=device)
+        # Convert on the device, one tensor at a time, to the dtypes the model keeps.
+        dtypes = {name: value.dtype for name, value in shape.state_dict().items()}
+        tensors = read_tensors_to_device(checkpoint, task=task, device=device, dtypes=dtypes)
     else:
         tensors = read_tensors(checkpoint, task=task)
-    return build_model(config, tensors)
+    return build_model(config, tensors, model=shape)
 
 
 def download_checkpoint(source):
@@ -56,6 +62,14 @@ def load_hosted_model(task: str, source: ModelSource, device=None, validate=None
     if checkpoint.architecture != source.architecture:
         raise ValueError("The official checkpoint has the wrong architecture")
     return load_checkpoint(checkpoint, task, device, validate)
+
+
+def weights_stamp(source: CheckpointSource) -> tuple[int, ...] | None:
+    """Return file attributes that change when local weights are rewritten or replaced."""
+    if isinstance(source, ModelSource):
+        return None
+    status = os.stat(source.weights)
+    return status.st_dev, status.st_ino, status.st_size, status.st_mtime_ns, status.st_ctime_ns
 
 
 def checkpoint_identity(source: CheckpointSource, *, expected_digest=None) -> dict[str, str] | None:
