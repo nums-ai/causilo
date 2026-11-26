@@ -6,6 +6,8 @@ import numpy as np
 import pandas as pd
 from sklearn.preprocessing import OrdinalEncoder
 
+from ...validation import describe_column_mismatch
+
 
 @dataclass
 class FeatureEncoder:
@@ -81,14 +83,15 @@ class FeatureEncoder:
         """
         if isinstance(table, pd.DataFrame):
             if self.names is not None and tuple(table.columns) != self.names:
-                raise ValueError("Prediction columns must match fit columns in name and order")
-            numerical = table.iloc[:, list(self.continuous)].to_numpy(dtype=np.float64, na_value=np.nan)
+                raise ValueError(_column_order_message(self.names, tuple(table.columns)))
             if table.shape[1] != self.width:
-                raise ValueError(f"Expected {self.width} feature columns")
+                raise ValueError(f"Expected {self.width} feature columns, got {table.shape[1]}")
+            numerical = table.iloc[:, list(self.continuous)].to_numpy(dtype=np.float64, na_value=np.nan)
         else:
             values = np.asarray(table)
             if values.ndim != 2 or values.shape[1] != self.width:
-                raise ValueError(f"Expected {self.width} feature columns")
+                got = f", got {values.shape[1]}" if values.ndim == 2 else ""
+                raise ValueError(f"Expected {self.width} feature columns{got}")
             numerical = values[:, self.continuous]
             if pd.api.types.is_object_dtype(numerical.dtype):
                 numerical = np.where(pd.isna(numerical), np.nan, numerical)
@@ -103,3 +106,21 @@ class FeatureEncoder:
     def transform(self, table) -> np.ndarray:
         """Apply the fitted mappings and varying-feature mask without refitting."""
         return self.encode(table)[:, self.retained]
+
+
+def _column_order_message(expected: tuple, actual: tuple) -> str:
+    """Explain how prediction columns differ from the fitted names and order."""
+    return "Prediction columns must match fit columns in name and order. " + _column_order_details(expected, actual)
+
+
+def _column_order_details(expected: tuple, actual: tuple) -> str:
+    if details := describe_column_mismatch(expected, actual):
+        return details
+    names = pd.Index(actual, dtype=object, tupleize_cols=False)
+    if not names.is_unique:
+        return f"Duplicate columns: {list(names[names.duplicated()].unique())}"
+    position = next(index for index, pair in enumerate(zip(expected, actual)) if pair[0] != pair[1])
+    return (
+        f"Same columns in a different order; position {position} "
+        f"expects {expected[position]!r}, got {actual[position]!r}"
+    )

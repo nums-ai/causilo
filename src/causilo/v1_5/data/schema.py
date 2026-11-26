@@ -14,6 +14,8 @@ from pandas.api.types import (
     is_timedelta64_dtype,
 )
 
+from ...validation import describe_column_mismatch
+
 
 def table_shape(table) -> tuple[int, int]:
     """Return the row and feature counts of a nonempty table."""
@@ -38,7 +40,10 @@ def named_column_positions(table, expected: Iterable | None) -> np.ndarray | Non
         raise ValueError("DataFrame columns must have unique names")
     positions = actual.get_indexer(fitted)
     if len(actual) != len(fitted) or np.any(positions < 0):
-        raise ValueError("Prediction columns must match the names supplied during fit")
+        raise ValueError(
+            "Prediction columns must match the names supplied during fit. "
+            + describe_column_mismatch(fitted, actual)
+        )
     return None if np.array_equal(positions, np.arange(len(actual))) else positions
 
 
@@ -63,4 +68,4 @@ def check_feature_types(table) -> None:
 def check_feature_count(actual: int, expected: int) -> None:
     """Reject a table whose input width differs from its fitted width."""
     if actual != expected:
-        raise ValueError(f"Expected {expected} feature columns")
+        raise ValueError(f"Expected {expected} feature columns, got {actual}")

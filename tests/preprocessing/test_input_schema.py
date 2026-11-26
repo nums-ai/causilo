@@ -50,6 +50,55 @@ def test_named_queries_follow_the_fitted_schema(encoder_class):
         query(np.zeros((1, 3)))
 
 
+def test_named_column_mismatch_lists_missing_and_unexpected_names():
+    train = pd.DataFrame(np.zeros((3, 4)), columns=["f1", "f2", "f3", "f4"])
+    encoder, _ = FeatureEncoder15.fit(train)
+
+    def error_for(query):
+        with pytest.raises(ValueError) as error:
+            encoder.query_layout(query)
+        return str(error.value)
+
+    missing = error_for(train.drop(columns="f3"))
+    assert missing.endswith("Missing columns: ['f3']")
+    assert "unexpected" not in missing
+    unexpected = error_for(train.assign(extra=0.))
+    assert unexpected.endswith("unexpected columns: ['extra']")
+    assert "Missing" not in unexpected
+    assert error_for(train.rename(columns={"f3": "extra"})).endswith(
+        "Missing columns: ['f3']; unexpected columns: ['extra']",
+    )
+    wide = pd.DataFrame(np.zeros((1, 8)), columns=[f"g{index}" for index in range(8)])
+    assert error_for(train.drop(columns=["f2", "f3", "f4"]).join(wide)).endswith(
+        "Missing columns: ['f2', 'f3', 'f4']; "
+        "unexpected columns: ['g0', 'g1', 'g2', 'g3', 'g4'] and 3 more",
+    )
+    assert error_for(np.zeros((1, 5))) == "Expected 4 feature columns, got 5"
+
+
+def test_version_1_0_column_mismatch_names_columns_and_order():
+    train = pd.DataFrame(np.arange(12.).reshape(3, 4), columns=["f1", "f2", "f3", "f4"])
+    encoder, _ = FeatureEncoder.fit(train)
+
+    def error_for(query):
+        with pytest.raises(ValueError) as error:
+            encoder.transform(query)
+        return str(error.value)
+
+    prefix = "Prediction columns must match fit columns in name and order. "
+    assert error_for(train.drop(columns="f3")) == prefix + "Missing columns: ['f3']"
+    assert error_for(train.assign(extra=0.)) == prefix + "unexpected columns: ['extra']"
+    assert error_for(train.rename(columns={"f3": "extra"})) == (
+        prefix + "Missing columns: ['f3']; unexpected columns: ['extra']"
+    )
+    assert error_for(train[["f1", "f3", "f2", "f4"]]) == (
+        prefix + "Same columns in a different order; position 1 expects 'f2', got 'f3'"
+    )
+    assert error_for(train[["f1", "f2", "f3", "f4", "f1"]]) == prefix + "Duplicate columns: ['f1']"
+    assert error_for(np.zeros((1, 5))) == "Expected 4 feature columns, got 5"
+    assert error_for(np.zeros(4)) == "Expected 4 feature columns"
+
+
 def test_tuple_column_names_match_after_reordering():
     names = pd.MultiIndex.from_tuples([("inputs", "amount"), ("inputs", "size")])
     table = pd.DataFrame([[1., 0.], [2., 3.], [3., 1.]], columns=names)

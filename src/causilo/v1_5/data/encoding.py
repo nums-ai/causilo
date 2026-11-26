@@ -151,8 +151,8 @@ class FeatureEncoder:
     def query_layout(self, table) -> tuple[int, np.ndarray | None]:
         """Validate the whole query and locate fitted columns for its slices."""
         rows, width = table_shape(table)
-        check_feature_count(width, self.width)
         positions = named_column_positions(table, self.names)
+        check_feature_count(width, self.width)
         check_feature_types(table)
         return rows, positions
 
