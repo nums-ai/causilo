@@ -274,6 +274,11 @@ dependency versions. Refit from the original training data to replace an earlier
 saved fit. Python pickle and joblib round trips of the estimator use the device
 and memory settings in the saved estimator parameters.
 
+Frameworks can pickle Causilo 1.5 fitted attributes directly. Restoration
+recreates unlocked locks, preserving those shared by sampled members. CUDA
+streams and temporary length caches are rebuilt during prediction. Estimator
+pickle and `save_context()` use the checkpoint-aware restoration described above.
+
 ## Local checkpoints
 
 Pass `checkpoint_path` with the weights file or directory described in

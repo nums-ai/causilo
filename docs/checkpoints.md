@@ -42,6 +42,32 @@ The 1.5 `config.json` identifies the architecture, checkpoint format,
 configuration version, task and model dimensions. Its exact file bytes are
 bound to `model.safetensors` through the `config_sha256` metadata field.
 
+## Pretrained networks
+
+Use `load_pretrained_model` when a framework manages pretrained networks
+separately from fitted contexts:
+
+```python
+from causilo import load_pretrained_model
+
+network = load_pretrained_model(
+    task="classification", model_version="1.5", device="cuda:0"
+)
+```
+
+The function returns the pinned PyTorch network in evaluation mode, on the
+requested device. `task` is `"classification"` or `"regression"`;
+`model_version` is `"1.0"` or `"1.5"` (default). `device` accepts one CPU, MPS,
+or CUDA device, or `"auto"`, and defaults to `"cpu"`. Causilo 1.5 prepares BF16
+output projections on supported CUDA devices, following the estimator's policy.
+
+The estimators prepare preprocessing and labeled contexts. Network caching
+belongs to the calling framework. To share weights, register
+`causilo:load_pretrained_model` with `task` and `model_version` as the key and
+`device` as placement. Official single-device 1.5 fits use this entry point
+without explicit memory budgets. Local checkpoints, custom hosted sources,
+budgeted fits and multi-device fits retain their existing loading paths.
+
 ## File checksums
 
 SHA-256 for the release files at the pinned revisions above. The

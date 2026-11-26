@@ -97,7 +97,7 @@ def import_estimator(estimator, saved, **placement):
     invalidate_fit(estimator)
     estimator.__dict__.pop("_engine", None)
     estimator.__dict__.pop("_checkpoint_request", None)
-    parameters = {"max_context": None, "mode": None} | saved["parameters"] | placement
+    parameters = saved["parameters"] | placement
     estimator.__dict__.update(parameters)
     if saved["fitted"] is None:
         return

@@ -5,6 +5,7 @@ from collections.abc import Callable
 import torch
 from torch import Tensor
 
+from ..nn.layers.feedforward import FeedForward
 from .memory import Stage
 
 
@@ -14,6 +15,18 @@ def supports_bf16(device: torch.device) -> bool:
         return False
     with torch.cuda.device(device):
         return torch.cuda.is_bf16_supported(including_emulation=False)
+
+
+def place_model(
+    model: torch.nn.Module, device: torch.device, *, bf16_output_projection: bool,
+) -> torch.nn.Module:
+    """Place fixed weights and prepare the selected output-projection precision."""
+    model.to(device)
+    if bf16_output_projection:
+        for layer in model.modules():
+            if isinstance(layer, FeedForward):
+                layer.prepare_bf16_output()
+    return model
 
 
 def stage_dtype(stage: Stage, device: torch.device) -> torch.dtype:
