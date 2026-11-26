@@ -3,15 +3,61 @@ from threading import Lock
 
 import numpy as np
 import pytest
+import torch
 
 from causilo import CausiloClassifier, CausiloRegressor
+
+
+def numerical_state(value, seen=None, path="state"):
+    """Visit stored arrays once, excluding transient prediction state."""
+    seen = set() if seen is None else seen
+    if id(value) in seen:
+        return {}
+    seen.add(id(value))
+    if isinstance(value, (torch.Tensor, np.ndarray)):
+        return {path: value}
+    if isinstance(value, dict):
+        items = value.items()
+    elif isinstance(value, (tuple, list)):
+        items = enumerate(value)
+    elif hasattr(value, "__dict__") and not isinstance(value, type):
+        items = vars(value).items()
+    else:
+        return {}
+    return {
+        key: leaf for name, item in items if name not in ("_stream", "_length_gains")
+        for key, leaf in numerical_state(item, seen, f"{path}.{name}").items()
+    }
 
 
 def restore_attributes(estimator):
     """Exercise frameworks that bypass the estimator's checkpoint-aware pickle hooks."""
     restored = type(estimator).__new__(type(estimator))
     restored.__dict__.update(pickle.loads(pickle.dumps(estimator.__dict__)))
+    expected, actual = numerical_state(estimator), numerical_state(restored)
+    assert expected
+    assert actual.keys() == expected.keys()
+    for name, value in expected.items():
+        other = actual[name]
+        assert other.dtype == value.dtype and other.shape == value.shape, name
+        if isinstance(value, torch.Tensor):
+            torch.testing.assert_close(other, value, rtol=0, atol=0, equal_nan=True)
+        elif value.dtype.hasobject:
+            np.testing.assert_equal(other.tolist(), value.tolist())
+        else:
+            np.testing.assert_array_equal(other, value)
     return restored
+
+
+def assert_predictions_close(actual, expected, *, classification=False):
+    # Exact restored state need not produce bitwise-identical CPU recomputation.
+    assert actual.dtype == expected.dtype and actual.shape == expected.shape
+    assert np.isfinite(actual).all() and np.isfinite(expected).all()
+    if classification:
+        np.testing.assert_allclose(actual, expected, rtol=0, atol=2e-7)
+        np.testing.assert_array_equal(actual.argmax(axis=1), expected.argmax(axis=1))
+    else:
+        np.testing.assert_allclose(actual, expected, rtol=1e-6, atol=1e-6)
 
 
 def outputs(estimator, query):
@@ -41,9 +87,9 @@ def test_fitted_attributes_pickle_before_and_after_predict(
     ).fit(train, targets)
     before = restore_attributes(estimator)
     expected = outputs(estimator, query)
-    np.testing.assert_array_equal(outputs(before, query), expected)
+    assert_predictions_close(outputs(before, query), expected, classification=task == "classification")
     after = restore_attributes(estimator)
-    np.testing.assert_array_equal(outputs(after, query), expected)
+    assert_predictions_close(outputs(after, query), expected, classification=task == "classification")
     if version == "1.5":
         engine = after._engine
         assert engine.model is engine._model_replicas[engine.device]
@@ -72,7 +118,7 @@ def test_batched_fitted_attributes_pickle(
     actual = getattr(restored, method)(queries)
     assert actual.keys() == expected.keys()
     for key, values in actual.items():
-        np.testing.assert_array_equal(values, expected[key])
+        assert_predictions_close(values, expected[key], classification=task == "classification")
 
 
 @pytest.mark.parametrize("cache", [False, True])
@@ -107,4 +153,4 @@ def test_sampled_pickle_preserves_shared_models_and_fresh_shared_locks(
         assert loaded._stream is None and loaded._length_gains == {}
         assert loaded.model is restored._engine.model
         assert loaded._model_runner.model is restored._engine.model
-    np.testing.assert_array_equal(restored.predict(query), expected)
+    assert_predictions_close(restored.predict(query), expected)
