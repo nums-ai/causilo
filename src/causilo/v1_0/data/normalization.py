@@ -150,10 +150,10 @@ class Normalizer:
                     scale = float(np.max(np.abs(unique)))
                     total = int(frequencies.sum())
                     if scale:
-                        mean = math.fsum(
-                            (float(value) / scale) * (int(count) / total)
-                            for value, count in zip(unique, frequencies)
-                        )
+                        # Vectorized products match the per-element float64
+                        # Python arithmetic exactly; only the sum needs fsum.
+                        terms = (unique.astype(np.float64) / scale) * (frequencies.astype(np.int64) / total)
+                        mean = math.fsum(terms.tolist())
                         fill[index] = np.clip(mean, -1.0, 1.0) * scale
         filled = np.where(missing, fill, table)
         if method == "rank2gaussian":
