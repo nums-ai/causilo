@@ -1,12 +1,16 @@
 # Inference details
 
-The classifier and regressor use Causilo 1.5 by default. Choose
-`mode="light"` for one ensemble member or `mode="default"` for eight, which
-is also the behavior when both options are omitted. Both modes work with
-`model_version="1.0"`.
+The classifier and regressor use Causilo 1.5 by default. Specify
+`mode="default"` or omit both `mode` and `n_estimators` to use the
+default ensemble. In 1.5, classification uses four members (two Base and
+two Robust) and regression uses eight. With `model_version="1.0"`,
+both tasks use eight by default. Choose `mode="light"` for one member
+with either model version.
 
 To set an explicit ensemble size, pass `n_estimators`. Passing both `mode`
 and `n_estimators` with non-None values raises a `ValueError` at fit time.
+To reproduce the classification default from Causilo 1.5.0, use
+`CausiloClassifier(n_estimators=8)`.
 
 See [checkpoints](checkpoints.md) for the weights, revisions, and access
 instructions for each task and model version.
@@ -110,7 +114,7 @@ class limit (10 for the hosted checkpoints). Beyond that limit, use
 
 For 1.5, contexts with up to ten classes use the configured ensemble. With
 more than ten, the classifier uses error-correcting output codes (ECOC).
-Each code row runs one estimator, including with the default `n_estimators=8`.
+Each code row runs one estimator for any ensemble size.
 Code rows run on the first selected device. In 1.0, each code row uses the
 configured ensemble.
 

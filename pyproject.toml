@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "causilo"
-version = "1.5.0"
+version = "1.5.1"
 description = "Tabular classification and regression with a scikit-learn API"
 readme = "README.md"
 requires-python = ">=3.10,<3.15"
