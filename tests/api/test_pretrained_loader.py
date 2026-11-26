@@ -86,12 +86,13 @@ def test_public_loader_validates_model_version():
 
 @pytest.mark.parametrize("task", ["classification", "regression"])
 @pytest.mark.parametrize("cache", [False, True])
-def test_hosted_fits_can_share_the_public_loader(hosted_checkpoints, monkeypatch, task, cache):
+@pytest.mark.parametrize("members", [None, 1])
+def test_hosted_fits_can_share_the_public_loader(hosted_checkpoints, monkeypatch, task, cache, members):
     constructor = CausiloClassifier if task == "classification" else CausiloRegressor
     table = np.random.default_rng(18).normal(size=(24, 4))
     targets = np.arange(len(table)) % 3 if task == "classification" else table[:, 0] ** 2
     query = table[:3]
-    options = dict(n_estimators=1, device="cpu", use_kv_cache=cache)
+    options = dict(n_estimators=members, device="cpu", use_kv_cache=cache)
     predict = "predict_proba" if task == "classification" else "predict"
     expected = getattr(constructor(**options).fit(table, targets), predict)(query)
     load = causilo.load_pretrained_model

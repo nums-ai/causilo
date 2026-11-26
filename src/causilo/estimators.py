@@ -59,6 +59,7 @@ def memory_budget_key(request) -> dict[str, int]:
 
 def fit_options(estimator, engine):
     """Forward the fitted-context settings supported by the selected runtime."""
+    uses_runtime15 = engine.source.architecture == RUNTIME15_FORMAT
     mode = estimator.mode
     n_estimators = estimator.n_estimators
     if mode is not None:
@@ -67,7 +68,12 @@ def fit_options(estimator, engine):
         if n_estimators is not None:
             raise ValueError("Specify either mode or n_estimators")
     if n_estimators is None:
-        n_estimators = 1 if mode == "light" else 8
+        if mode == "light":
+            n_estimators = 1
+        elif uses_runtime15 and engine.task == "classification":
+            n_estimators = 4
+        else:
+            n_estimators = 8
 
     options = {
         "n_estimators": n_estimators,
@@ -75,7 +81,7 @@ def fit_options(estimator, engine):
         "retain_preprocessing": estimator.retain_preprocessing,
         "random_state": estimator.random_state,
     }
-    if engine.source.architecture == RUNTIME15_FORMAT:
+    if uses_runtime15:
         options["max_context"] = estimator.max_context
     return options
 
@@ -140,7 +146,7 @@ class CausiloClassifier(ClassifierMixin, BaseEstimator):
         Use the default ensemble or Light mode. Available for both model versions.
     n_estimators : int or None, default=None
         Override the number of ensemble members. Specify either this or mode.
-        The default uses eight members and Light uses one.
+        The default uses four members in 1.5 and eight in 1.0. Light uses one.
         For 1.5 contexts with more than ten classes, each ECOC code row uses
         one member. In 1.0 each code row uses the configured ensemble.
     random_state : int or None, default=42

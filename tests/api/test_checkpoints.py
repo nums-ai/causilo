@@ -73,14 +73,24 @@ def test_ensemble_modes_match_explicit_counts(constructor, task, version, checkp
     explicit = constructor(1, **options).fit(table, target)
     np.testing.assert_array_equal(predictions(light.fit(table, target), query), predictions(explicit, query))
 
-    explicit = constructor(8, **options).fit(table, target)
-    np.testing.assert_array_equal(predictions(constructor(**options).fit(table, target), query), predictions(explicit, query))
-
+    default_count = 4 if version == "1.5" and task == "classification" else 8
     batched_predict = "predict_proba_batched" if task == "classification" else "predict_batched"
-    light.fit_batched({"table": (table, target)})
-    explicit = constructor(1, **options).fit_batched({"table": (table, target)})
-    actual = getattr(light, batched_predict)({"table": query})["table"]
-    expected = getattr(explicit, batched_predict)({"table": query})["table"]
+    batch = {"table": (table, target)}
+    queries = {"table": query}
+    explicit = constructor(default_count, **options).fit(table, target)
+    expected = predictions(explicit, query)
+    explicit.fit_batched(batch)
+    expected_batched = getattr(explicit, batched_predict)(queries)["table"]
+    for mode in (None, "default"):
+        model = constructor(mode=mode, **options).fit(table, target)
+        np.testing.assert_array_equal(predictions(model, query), expected)
+        model.fit_batched(batch)
+        np.testing.assert_array_equal(getattr(model, batched_predict)(queries)["table"], expected_batched)
+
+    light.fit_batched(batch)
+    explicit = constructor(1, **options).fit_batched(batch)
+    actual = getattr(light, batched_predict)(queries)["table"]
+    expected = getattr(explicit, batched_predict)(queries)["table"]
     np.testing.assert_array_equal(actual, expected)
 
     light.set_params(n_estimators=1)
