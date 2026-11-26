@@ -1,3 +1,4 @@
+import gc
 import pickle
 
 import numpy as np
@@ -76,9 +77,12 @@ def test_refit_reuses_restored_model_only_for_same_budget(checkpoint15, mixed_da
 
     restored.fit(X, y)
     assert restored._engine.model is model
+    engine = restored._engine
     restored.set_params(device_memory_budget_bytes=initial_budget).fit(X, y)
+    assert restored._engine is not engine
     assert restored._engine.memory_budgets == initial_budget
-    assert restored._engine.model is not model
+    # Budgets change workspace planning, not the weights, so the loaded model is shared.
+    assert restored._engine.model is model
 
 
 @pytest.fixture
@@ -98,9 +102,9 @@ def test_refit_and_restore_read_one_checkpoint_for_all_active_replicas(
     load = checkpoints.load_model
     reads = []
 
-    def record(*args, expected_digest):
+    def record(*args, expected_digest, **kwargs):
         reads.append(expected_digest)
-        return load(*args, expected_digest=expected_digest)
+        return load(*args, expected_digest=expected_digest, **kwargs)
 
     monkeypatch.setattr(checkpoints, "load_model", record)
     table, _ = mixed_data
@@ -117,7 +121,14 @@ def test_refit_and_restore_read_one_checkpoint_for_all_active_replicas(
     assert reads == [None, digest]
     model.fit(table, targets)
     assert reads == [None, digest]
-    restored = pickle.loads(pickle.dumps(model))
+    payload = pickle.dumps(model)
+    restored = pickle.loads(payload)
+    # The live estimator's replicas are shared instead of read again.
+    assert reads == [None, digest]
+    assert len(restored._engine._model_replicas) == len(simulated_devices)
+    del model, restored
+    gc.collect()
+    restored = pickle.loads(payload)
     assert reads == [None, digest, digest]
     assert len(restored._engine._model_replicas) == len(simulated_devices)
 

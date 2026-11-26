@@ -11,6 +11,16 @@ from causilo.model_selection import RUNTIME15_FORMAT
 from causilo.v1_0.model import Model, ModelConfig
 
 
+@pytest.fixture(autouse=True)
+def isolated_shared_models():
+    """Load weights afresh in each test, since tests replace checkpoints and loaders."""
+    from causilo.v1_5.engine import clear_shared_models
+
+    clear_shared_models()
+    yield
+    clear_shared_models()
+
+
 @pytest.fixture
 def batch_runtime():
     """Keep small batch tests inexpensive without changing other test modules."""

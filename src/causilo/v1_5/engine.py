@@ -1,7 +1,9 @@
 """Connect fixed pretrained weights to fitted data, caches, and ensemble outputs."""
 
+import weakref
 from functools import cached_property
 from numbers import Integral
+from threading import Lock
 
 import numpy as np
 import torch
@@ -15,6 +17,17 @@ from .execution.fit import ContextState
 from .execution.precision import supports_bf16
 from .nn.checkpoint import build_model
 from .nn.layers.feedforward import FeedForward
+
+# Loaded weights shared by live estimators with the same checkpoint, task and device.
+# Entries disappear when no estimator holds the model.
+_shared_models = weakref.WeakValueDictionary()
+_shared_models_lock = Lock()
+
+
+def clear_shared_models() -> None:
+    """Stop sharing loaded weights with new estimators; existing estimators keep theirs."""
+    with _shared_models_lock:
+        _shared_models.clear()
 
 
 def resolve_device(request: str) -> torch.device:
@@ -76,38 +89,82 @@ class Engine:
         """Choose one projection precision for all replicas of this engine."""
         return all(supports_bf16(device) for device in self.devices)
 
-    def _place_model(self, model, device):
-        projections = [layer for layer in model.modules() if isinstance(layer, FeedForward)]
+    def _check_budget(self, model, device):
         limit = self.memory_budgets.get(str(device))
-        if limit is not None:
-            weight_bytes = sum(value.nbytes for value in model.state_dict().values())
-            projection_bytes = torch.bfloat16.itemsize * sum(
-                parameter.numel() for layer in projections for parameter in layer.output.parameters()
-            )
-            if weight_bytes >= limit or (
-                weight_bytes + projection_bytes >= limit and self.bf16_output_projection
-            ):
-                raise ValueError(f"The memory budget for {device} must exceed the model weight size")
+        if limit is None:
+            return
+        weight_bytes = sum(value.nbytes for value in model.state_dict().values())
+        projection_bytes = torch.bfloat16.itemsize * sum(
+            parameter.numel()
+            for layer in model.modules() if isinstance(layer, FeedForward)
+            for parameter in layer.output.parameters()
+        )
+        if weight_bytes >= limit or (
+            weight_bytes + projection_bytes >= limit and self.bf16_output_projection
+        ):
+            raise ValueError(f"The memory budget for {device} must exceed the model weight size")
+
+    def _place_model(self, model, device):
+        self._check_budget(model, device)
         model.to(device)
         if self.bf16_output_projection:
-            for layer in projections:
-                layer.prepare_bf16_output()
+            for layer in model.modules():
+                if isinstance(layer, FeedForward):
+                    layer.prepare_bf16_output()
         return model
 
+    def _shares(self, model) -> bool:
+        """Reuse a loaded model only if its output projection matches this engine's precision."""
+        layer = next(layer for layer in model.modules() if isinstance(layer, FeedForward))
+        return (layer._output_weight_bf16 is not None) == self.bf16_output_projection
+
     def initialize_model(self, n_members=1, *, expected_digest=None):
-        """Place the active replicas from one CPU checkpoint, retaining them across fits."""
+        """Place the active replicas, retaining them across fits.
+
+        Replicas already loaded by another live estimator are shared. The rest come
+        from one checkpoint read: CUDA receives it directly, other devices via the CPU.
+        """
         devices = self.devices[:n_members]
         missing = [device for device in devices if device not in self._model_replicas]
         if missing:
             if self.checkpoint is not None:
                 expected_digest = self.checkpoint["digest"]
-            template, identity = checkpoints.load_model(self.task, self.source, expected_digest=expected_digest)
+            identity = checkpoints.checkpoint_identity(self.source, expected_digest=expected_digest)
+            source = checkpoints.source_key(self.source, identity)
+            keys = {device: (self.task, source, str(device)) for device in missing}
+            with _shared_models_lock:
+                shared = {device: _shared_models.get(key) for device, key in keys.items()}
             placed = {}
-            for device in missing[:-1]:
-                # Each replica gets its own modules and reads the same host weight storage.
-                replica = build_model(template.config, template.state_dict())
-                placed[device] = self._place_model(replica, device)
-            placed[missing[-1]] = self._place_model(template, missing[-1])
+            for device, model in shared.items():
+                if model is not None:
+                    self._check_budget(model, device)
+                    if self._shares(model):
+                        placed[device] = model
+            unloaded = [device for device in missing if device not in placed]
+            if unloaded:
+                first = unloaded[0]
+
+                def check_budgets(model):
+                    for device in unloaded:
+                        self._check_budget(model, device)
+
+                budgeted = any(str(device) in self.memory_budgets for device in unloaded)
+                template, identity = checkpoints.load_model(
+                    self.task, self.source, expected_digest=expected_digest, identity=identity,
+                    device=first if first.type == "cuda" else None,
+                    validate=check_budgets if budgeted else None,
+                )
+                loaded = {}
+                for device in unloaded[1:]:
+                    # Each replica gets its own modules and copies the template's weights.
+                    replica = build_model(template.config, template.state_dict())
+                    loaded[device] = self._place_model(replica, device)
+                loaded[first] = self._place_model(template, first)
+                with _shared_models_lock:
+                    # Another thread may have loaded the same weights meanwhile; keep one copy.
+                    for device, model in loaded.items():
+                        current = _shared_models.setdefault(keys[device], model)
+                        placed[device] = current if current is model or self._shares(current) else model
             self._model_replicas.update(placed)
             self.model = self._model_replicas[self.device]
             self.checkpoint = identity
