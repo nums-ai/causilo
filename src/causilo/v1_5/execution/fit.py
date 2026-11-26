@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from threading import Lock
 from typing import TYPE_CHECKING
 
 import numpy as np
@@ -14,7 +13,7 @@ from ..data.dataset import PreparedDataset, prepare_inputs, take_rows
 from ..data.encoding import fit_sampling_columns
 from ..data.ensemble import regression_trim
 from ..nn.model_config import NATIVE_CLASSES
-from .direct import EnsembleRunner
+from .direct import EnsembleRunner, PredictionLock
 from .parallel import ParallelEnsembleRunner, member_sections
 
 if TYPE_CHECKING:
@@ -70,7 +69,7 @@ def make_sampled_runners(engine: Engine, datasets):
     replicas = engine.initialize_model(len(datasets))
     rows = max(len(dataset.training) for dataset in datasets)
     width = max(dataset.training.shape[1] for dataset in datasets)
-    locks = {device: Lock() for device in replicas}
+    locks = {device: PredictionLock() for device in replicas}
     lanes = {
         device: EnsembleRunner(
             model, device, memory_budget_bytes=engine.memory_budgets.get(str(device)),

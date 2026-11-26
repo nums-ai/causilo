@@ -20,7 +20,7 @@ def test_sampled_retry_reuses_context_until_query_preparation_needs_memory(
         checkpoint_path=checkpoint15("regression"), device="cpu",
     ).fit(train, np.arange(len(train), dtype=float) ** 2)
     members = model._engine.require_state().members
-    lock = members[0].runner._prediction_lock
+    lock = members[0].runner._prediction_lock.lock
     retry_size = 1 if query_allocation_failure else 2
     with monkeypatch.context() as patch:
         patch.setattr(EnsembleRunner, "query_batch_size", lambda *args, **kwargs: retry_size)

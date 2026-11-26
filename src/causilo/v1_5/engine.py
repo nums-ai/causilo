@@ -8,11 +8,11 @@ import torch
 from sklearn.exceptions import NotFittedError
 
 from ..estimators import device_key, memory_budget_key
-from ..model_selection import CheckpointSource
+from ..model_selection import CheckpointSource, ModelSource, select_checkpoint
 from . import checkpoints
 from .execution import fit, prediction
 from .execution.fit import ContextState
-from .execution.precision import supports_bf16
+from .execution.precision import place_model, supports_bf16
 from .nn.checkpoint import build_model
 from .nn.layers.feedforward import FeedForward
 
@@ -77,9 +77,9 @@ class Engine:
         return all(supports_bf16(device) for device in self.devices)
 
     def _place_model(self, model, device):
-        projections = [layer for layer in model.modules() if isinstance(layer, FeedForward)]
         limit = self.memory_budgets.get(str(device))
         if limit is not None:
+            projections = [layer for layer in model.modules() if isinstance(layer, FeedForward)]
             weight_bytes = sum(value.nbytes for value in model.state_dict().values())
             projection_bytes = torch.bfloat16.itemsize * sum(
                 parameter.numel() for layer in projections for parameter in layer.output.parameters()
@@ -88,26 +88,36 @@ class Engine:
                 weight_bytes + projection_bytes >= limit and self.bf16_output_projection
             ):
                 raise ValueError(f"The memory budget for {device} must exceed the model weight size")
-        model.to(device)
-        if self.bf16_output_projection:
-            for layer in projections:
-                layer.prepare_bf16_output()
-        return model
+        return place_model(model, device, bf16_output_projection=self.bf16_output_projection)
 
     def initialize_model(self, n_members=1, *, expected_digest=None):
         """Place the active replicas from one CPU checkpoint, retaining them across fits."""
         devices = self.devices[:n_members]
         missing = [device for device in devices if device not in self._model_replicas]
         if missing:
-            if self.checkpoint is not None:
-                expected_digest = self.checkpoint["digest"]
-            template, identity = checkpoints.load_model(self.task, self.source, expected_digest=expected_digest)
-            placed = {}
-            for device in missing[:-1]:
-                # Each replica gets its own modules and reads the same host weight storage.
-                replica = build_model(template.config, template.state_dict())
-                placed[device] = self._place_model(replica, device)
-            placed[missing[-1]] = self._place_model(template, missing[-1])
+            if (
+                len(self.devices) == 1 and not self.memory_budgets
+                and isinstance(self.source, ModelSource)
+                and self.source == select_checkpoint("1.5", self.task)
+            ):
+                from .. import load_pretrained_model
+
+                placed = {
+                    self.device: load_pretrained_model(self.task, model_version="1.5", device=str(self.device)),
+                }
+                identity = None
+            else:
+                if self.checkpoint is not None:
+                    expected_digest = self.checkpoint["digest"]
+                template, identity = checkpoints.load_model(self.task, self.source, expected_digest=expected_digest)
+                placed = {}
+                for device in missing:
+                    # Place the template last so every replica reads the same host weight storage.
+                    replica = (
+                        template if device == missing[-1]
+                        else build_model(template.config, template.state_dict())
+                    )
+                    placed[device] = self._place_model(replica, device)
             self._model_replicas.update(placed)
             self.model = self._model_replicas[self.device]
             self.checkpoint = identity
