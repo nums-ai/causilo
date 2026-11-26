@@ -59,6 +59,27 @@ def test_concurrent_host_spills_share_headroom_and_release_on_error(monkeypatch)
         pass
 
 
+def test_minimum_direct_workspace_takes_the_larger_phase(monkeypatch):
+    """Pooling releases the feature grids before the prediction workspace is allocated."""
+    monkeypatch.setattr(torch.cuda, "get_device_capability", lambda device: (9, 0))
+    device = torch.device("cuda")
+    model = SimpleNamespace(config=ModelConfig(max_classes=0))
+    width = model.config.prediction_width
+
+    def phases(shape):
+        members, rows, features = shape
+        persistent = members * rows * (features + 2 * width) * memory.FP32_BYTES
+        grids = memory.direct_activation_bytes(model, shape)
+        prediction = Workload(Stage.PREDICTION, rows, width, rows).bytes_per_item(device)
+        return memory.minimum_direct_workspace_bytes(model, shape, device) - persistent, grids, prediction
+
+    minimum, grids, prediction = phases((1, 12_000, 50))
+    assert prediction < grids < minimum < grids + prediction
+    # A tall, narrow member needs its untiled prediction pass, not the grids beside it.
+    minimum, grids, prediction = phases((1, 200_000, 4))
+    assert grids < minimum == prediction
+
+
 @pytest.mark.parametrize(
     ("num_classes", "budget", "reuse_context", "failure", "expected"),
     [

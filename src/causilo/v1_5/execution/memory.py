@@ -114,20 +114,26 @@ def estimate_table_workspace_bytes(model, shape: tuple[int, ...], device: torch.
 
 
 def minimum_direct_workspace_bytes(model, shape: tuple[int, ...], device: torch.device) -> int:
-    """Budget adjacent activation grids, resident inputs and a minimum direct stage tile."""
+    """Budget the larger of the grid phase and the prediction phase of a tiled direct pass.
+
+    The feature grids are released once rows are pooled, so they never coexist
+    with the prediction workspace. The grid phase keeps two minimum stage tiles
+    beside both grids; prediction runs one member, its smallest partition.
+    """
     members, rows, features = shape
     config = model.config
     persistent = members * rows * (features + 2 * config.prediction_width) * FP32_BYTES
     embedding = Workload(Stage.FEATURE_EMBEDDING, rows, config.width, rows)
     columns = Workload(Stage.COLUMN, rows, config.width, rows)
     prediction = Workload(Stage.PREDICTION, rows, config.prediction_width, rows)
-    tile = max(
+    grid_tile = max(
         embedding.bytes_per_item(device),
         columns.bytes_per_item(device),
         query_row_workspace_bytes(model, features, device),
-        prediction.bytes_per_item(device),
     )
-    return direct_activation_bytes(model, shape) + persistent + 2 * tile
+    return persistent + max(
+        direct_activation_bytes(model, shape) + 2 * grid_tile, prediction.bytes_per_item(device),
+    )
 
 
 def query_row_workspace_bytes(model, features: int, device: torch.device) -> int:
