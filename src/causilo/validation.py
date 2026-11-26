@@ -1,6 +1,35 @@
-"""Validate regression output options shared by the estimators."""
+"""Validate inputs and output options shared by the estimators and model versions."""
+
+from collections.abc import Iterable
 
 import numpy as np
+import pandas as pd
+
+_NAME_PREVIEW_LIMIT = 5
+
+
+def describe_column_mismatch(expected: Iterable, actual: Iterable) -> str:
+    """Name the first missing and unexpected columns so wide tables are easy to fix.
+
+    Returns an empty string when both sides hold the same set of names.
+    """
+    expected = pd.Index(tuple(expected), dtype=object, tupleize_cols=False)
+    actual = pd.Index(tuple(actual), dtype=object, tupleize_cols=False)
+    details = [
+        f"{label} columns: {_preview_names(names)}"
+        for label, names in (
+            ("Missing", expected[~expected.isin(actual)]),
+            ("unexpected", actual[~actual.isin(expected)]),
+        )
+        if len(names)
+    ]
+    return "; ".join(details)
+
+
+def _preview_names(names: pd.Index) -> str:
+    shown = repr(list(names[:_NAME_PREVIEW_LIMIT]))
+    hidden = len(names) - _NAME_PREVIEW_LIMIT
+    return f"{shown} and {hidden} more" if hidden > 0 else shown
 
 
 def validate_quantiles(quantiles) -> np.ndarray:

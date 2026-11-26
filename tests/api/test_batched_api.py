@@ -317,6 +317,15 @@ def test_invalid_queries_name_the_table_and_preserve_fit(small_checkpoints):
     np.testing.assert_array_equal(model.predict_batched({"b": b[:2]})["b"], expected)
 
 
+def test_batched_query_with_missing_named_column_lists_it(small_checkpoints):
+    a, _ = data()
+    model = CausiloRegressor(model_version="1.0", device="cpu", n_estimators=1).fit_batched({
+        "a": (a, np.arange(len(a))),
+    })
+    with pytest.raises(ValueError, match=r"Table 'a': .*Missing columns: \['b'\]$"):
+        model.predict_batched({"a": a.drop(columns="b").iloc[:2]})
+
+
 def test_restore_validates_every_table_cache(small_checkpoints):
     a, b = data()
     model = CausiloRegressor(model_version="1.0", device="cpu", n_estimators=1, use_kv_cache=True).fit_batched({
