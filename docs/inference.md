@@ -155,6 +155,14 @@ the mean prediction integrates this quantile distribution with endpoints that
 include the fitted target range. Ensembles with fewer than four members
 average all available predictions.
 
+## Input gradients
+
+For a supported single-table model fitted with `n_estimators=1`,
+`differentiable_predictor()` returns tensor predictions that retain the input
+autograd graph. This separate interface reuses fitted preprocessing and context;
+it does not train model weights. See [Differentiable query prediction](differentiable.md)
+for supported inputs, output types, and examples using `torch.autograd.grad`.
+
 ## Independent table batches
 
 Use `fit_batched` with nonempty string IDs to share model weights across

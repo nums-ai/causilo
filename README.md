@@ -56,6 +56,10 @@ set `max_context=200_000`. Set `model_version="1.0"` to use **Causilo 1.0**.
 
 `fit` prepares preprocessing and an inference context from your labeled table. `predict` uses that context with fixed model weights.
 
+For input gradients of supported single-estimator numeric fits, see
+[differentiable query prediction](docs/differentiable.md). This separate tensor
+interface preserves the fitted prediction function and leaves ordinary prediction unchanged.
+
 ## Benchmarks
 
 ![Benchmark Elo across ten benchmarks on the left and the TabArena speed–quality frontiers on the right. Gray shows official peers and purple adds Causilo.](docs/assets/benchmark-overview.png)
