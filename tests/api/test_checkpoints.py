@@ -356,9 +356,9 @@ def test_refit_switches_checkpoint_and_drops_old_context(make_batch_model, check
         sources.append(LEGACY_FORMAT)
         return make_batch_model(task)
 
-    def load(task, source):
+    def load(task, source, device=None, validate=None):
         sources.append(source.architecture)
-        return checkpoints15.load_checkpoint(checkpoint, task)
+        return checkpoints15.load_checkpoint(checkpoint, task, device, validate)
 
     monkeypatch.setattr(checkpoints, "load_hosted_model", load_original)
     monkeypatch.setattr(checkpoints15, "load_hosted_model", load)
@@ -386,5 +386,5 @@ def test_refit_switches_checkpoint_and_drops_old_context(make_batch_model, check
 
     model.set_params(model_version="1.0").fit(table, labels)
     np.testing.assert_array_equal(model.predict_proba(table[:2]), expected)
-    assert sources[:3] == [LEGACY_FORMAT, RUNTIME15_FORMAT, RUNTIME15_FORMAT]
-    assert sources[-1] == LEGACY_FORMAT
+    # The restored estimator shares the live estimator's 1.5 weights instead of loading them again.
+    assert sources == [LEGACY_FORMAT, RUNTIME15_FORMAT, LEGACY_FORMAT]

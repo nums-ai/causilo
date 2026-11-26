@@ -32,6 +32,6 @@ def validate_checkpoint(record: Mapping[str, Any]) -> ModelConfig:
     return model_config
 
 
-def build_model(config: ModelConfig, tensors):
-    """Build the shared 1.5 model from the weights and configuration."""
-    return assign_tensors(Model, config, tensors, match_dtype=True)
+def build_model(config: ModelConfig, tensors, *, model=None):
+    """Build the shared 1.5 model from the weights and configuration, optionally into a meta model."""
+    return assign_tensors(Model, config, tensors, match_dtype=True, model=model)

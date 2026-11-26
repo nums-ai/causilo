@@ -208,6 +208,14 @@ Causilo can reduce execution batches or split query rows when memory is tight.
 Each query still uses the fitted context and ensemble. Large contexts can
 exceed device memory.
 
+In one process, 1.5 estimators with the same checkpoint, task, and device share
+one copy of the model weights while any of them is alive. A second fit, a copy,
+or a restored estimator then skips loading the weights. A local checkpoint is
+still read once to fingerprint it, so changed files are loaded again. Weights
+are released when the last estimator using them is deleted. On CUDA, 1.5 copies
+the weights to the device in 64 MiB transfers, which uses at most one transfer
+of device memory beyond the weights.
+
 On Linux, 1.5 sizes host allocations using both available RAM and the memory
 limit of the process's cgroup. If a shared query batch exceeds host memory,
 1.5 retries it with fewer rows. On multiple GPUs, a device allocation failure
